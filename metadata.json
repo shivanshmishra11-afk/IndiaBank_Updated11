@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix Remix India Bank_v2",
+  "description": "India Bank NetBanking Portal featuring secure accounts, deposits, transactions, and RBI-compliant customer grievance redressal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
