@@ -1,0 +1,36 @@
+# Render Blueprint — connect the repo (GitLab/Bitbucket/GitHub) and Render reads this file.
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: india-netbanking
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      # Render fills this with the service's public URL; QR codes/payment links are built from it.
+      - key: APP_URL
+        fromService:
+          type: web
+          name: india-netbanking
+          envVarKey: RENDER_EXTERNAL_URL
+      # Secrets: entered once in the Render dashboard, never stored in the repo.
+      - key: INTELLECT_API_KEY
+        sync: false
+      - key: INTELLECT_USERNAME
+        sync: false
+      - key: INTELLECT_PASSWORD
+        sync: false
+      - key: INTELLECT_WORKSPACE_ID
+        sync: false
+      - key: INTELLECT_ASSET_ID
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false

@@ -2,18 +2,31 @@ import express from "express";
 import path from "path";
 import fs from "fs";
 import os from "os";
-import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import QRCode from "qrcode";
-import "dotenv/config";
+import dotenv from "dotenv";
+
+// .env.local (git-ignored) wins over .env; on Render the variables come from the dashboard instead.
+dotenv.config({ path: [".env.local", ".env"] });
 import { GoogleGenAI } from "@google/genai";
 import { ZORA_CATEGORIES, searchZoraKnowledge } from "./src/data/zoraKnowledge";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+
+// Intellect gateway credentials come from the environment (see .env.example). Never commit them.
+const INTELLECT = {
+  baseUrl: process.env.INTELLECT_BASE_URL || "https://api.in.intellectseecstag.com",
+  apiKey: process.env.INTELLECT_API_KEY || "",
+  username: process.env.INTELLECT_USERNAME || "",
+  password: process.env.INTELLECT_PASSWORD || "",
+  workspaceId: process.env.INTELLECT_WORKSPACE_ID || "",
+  assetId: process.env.INTELLECT_ASSET_ID || "83cb31d5-664a-4708-b567-200a5c35fefd",
+};
+if (!INTELLECT.apiKey || !INTELLECT.username || !INTELLECT.password || !INTELLECT.workspaceId) {
+  console.warn("[India Bank] INTELLECT_* environment variables are not set — the complaint gateway will reject requests.");
+}
 
 // Initialize Google GenAI client
 const ai = new GoogleGenAI(process.env.GEMINI_API_KEY ? { apiKey: process.env.GEMINI_API_KEY } : {});
@@ -673,10 +686,10 @@ Select your preferred payment method below to proceed.`;
 let tokenCache: { token: string; expiresAt: number } | null = null;
 
 async function getIntellectAccessToken(forceRefresh = false): Promise<string> {
-  const apikey = "magicplatform.A8018652167E463eaD986C222F2A42D4";
-  const username = "shivanshpf_indstg";
-  const password = "Intellect@8012";
-  const workspaceId = "d7d4d536-de17-4354-819a-fff06ba78b23";
+  const apikey = INTELLECT.apiKey;
+  const username = INTELLECT.username;
+  const password = INTELLECT.password;
+  const workspaceId = INTELLECT.workspaceId;
 
   const now = Date.now();
   if (!forceRefresh && tokenCache && tokenCache.expiresAt > now + 60000) {
@@ -684,7 +697,7 @@ async function getIntellectAccessToken(forceRefresh = false): Promise<string> {
   }
 
   console.log(`[Intellect Bank] Fetching fresh real-time access token for user: ${username}`);
-  const tokenRes = await fetch("https://api.in.intellectseecstag.com/accesstoken/pfpreview", {
+  const tokenRes = await fetch(`${INTELLECT.baseUrl}/accesstoken/pfpreview`, {
     method: "GET",
     headers: {
       "apikey": apikey,
@@ -709,15 +722,15 @@ async function getIntellectAccessToken(forceRefresh = false): Promise<string> {
 
 app.get("/api/complaint/gateway-status", async (_req, res) => {
   try {
-    const apikey = "magicplatform.A8018652167E463eaD986C222F2A42D4";
-    const workspaceId = "d7d4d536-de17-4354-819a-fff06ba78b23";
+    const apikey = INTELLECT.apiKey;
+    const workspaceId = INTELLECT.workspaceId;
 
-    const tokenRes = await fetch("https://api.in.intellectseecstag.com/accesstoken/pfpreview", {
+    const tokenRes = await fetch(`${INTELLECT.baseUrl}/accesstoken/pfpreview`, {
       method: "GET",
       headers: {
         "apikey": apikey,
-        "username": "shivanshpf_indstg",
-        "password": "Intellect@8012"
+        "username": INTELLECT.username,
+        "password": INTELLECT.password
       }
     });
 
@@ -727,8 +740,8 @@ app.get("/api/complaint/gateway-status", async (_req, res) => {
       ok: tokenRes.ok,
       data: tokenData,
       workspaceId,
-      endpoint: "https://api.in.intellectseecstag.com/accesstoken/pfpreview",
-      assetsEndpoint: "https://api.in.intellectseecstag.com/magicplatform/v1/assets"
+      endpoint: `${INTELLECT.baseUrl}/accesstoken/pfpreview`,
+      assetsEndpoint: `${INTELLECT.baseUrl}/magicplatform/v1/assets`
     });
   } catch (error: any) {
     return res.status(500).json({ error: error.message || "Failed to connect to gateway" });
@@ -738,10 +751,10 @@ app.get("/api/complaint/gateway-status", async (_req, res) => {
 // Endpoint to inspect MagicPlatform assets
 app.get("/api/complaint/assets", async (_req, res) => {
   try {
-    const apikey = "magicplatform.A8018652167E463eaD986C222F2A42D4";
-    const workspaceId = "d7d4d536-de17-4354-819a-fff06ba78b23";
+    const apikey = INTELLECT.apiKey;
+    const workspaceId = INTELLECT.workspaceId;
 
-    const assetsRes = await fetch("https://api.in.intellectseecstag.com/magicplatform/v1/assets", {
+    const assetsRes = await fetch(`${INTELLECT.baseUrl}/magicplatform/v1/assets`, {
       method: "GET",
       headers: {
         "apikey": apikey,
@@ -768,12 +781,12 @@ async function handleTrackComplaint(trace_id: string, res: express.Response) {
     return res.status(400).json({ error: "trace_id is required" });
   }
 
-  const apikey = "magicplatform.A8018652167E463eaD986C222F2A42D4";
-  const workspaceId = "d7d4d536-de17-4354-819a-fff06ba78b23";
+  const apikey = INTELLECT.apiKey;
+  const workspaceId = INTELLECT.workspaceId;
 
   try {
     let accessToken = await getIntellectAccessToken(false);
-    let trackRes = await fetch(`https://api.in.intellectseecstag.com/magicplatform/v1/invokeasset/83cb31d5-664a-4708-b567-200a5c35fefd/${trace_id}`, {
+    let trackRes = await fetch(`${INTELLECT.baseUrl}/magicplatform/v1/invokeasset/${INTELLECT.assetId}/${trace_id}`, {
       method: "GET",
       headers: {
         "apikey": apikey,
@@ -786,7 +799,7 @@ async function handleTrackComplaint(trace_id: string, res: express.Response) {
 
     if (trackRes.status === 401 || trackRes.status === 403) {
       accessToken = await getIntellectAccessToken(true);
-      trackRes = await fetch(`https://api.in.intellectseecstag.com/magicplatform/v1/invokeasset/83cb31d5-664a-4708-b567-200a5c35fefd/${trace_id}`, {
+      trackRes = await fetch(`${INTELLECT.baseUrl}/magicplatform/v1/invokeasset/${INTELLECT.assetId}/${trace_id}`, {
         method: "GET",
         headers: {
           "apikey": apikey,
@@ -847,8 +860,8 @@ app.post("/api/complaint/submit", async (req, res) => {
     return res.status(400).json({ error: "Missing required fields: email, productType, complaintDetails" });
   }
 
-  const apikey = "magicplatform.A8018652167E463eaD986C222F2A42D4";
-  const workspaceId = "d7d4d536-de17-4354-819a-fff06ba78b23";
+  const apikey = INTELLECT.apiKey;
+  const workspaceId = INTELLECT.workspaceId;
 
   const acct = (accountNumber && String(accountNumber).trim()) || "AC1000234567";
   const registeredEmail = (email && String(email).trim()) || "shivansh.mishra@intellectdesign.com";
@@ -877,7 +890,7 @@ app.post("/api/complaint/submit", async (req, res) => {
 
     // Step 2: Submit Complaint POST with access token
     console.log("[Intellect Bank] Step 2: Submitting complaint to agent platform invokeasset endpoint...");
-    let submitResponse = await fetch("https://api.in.intellectseecstag.com/magicplatform/v1/invokeasset/83cb31d5-664a-4708-b567-200a5c35fefd/usecase", {
+    let submitResponse = await fetch(`${INTELLECT.baseUrl}/magicplatform/v1/invokeasset/${INTELLECT.assetId}/usecase`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -893,7 +906,7 @@ app.post("/api/complaint/submit", async (req, res) => {
     if (submitResponse.status === 401 || submitResponse.status === 403) {
       console.log("[Intellect Bank] Token expired during invoke. Requesting forced fresh token...");
       accessToken = await getIntellectAccessToken(true);
-      submitResponse = await fetch("https://api.in.intellectseecstag.com/magicplatform/v1/invokeasset/83cb31d5-664a-4708-b567-200a5c35fefd/usecase", {
+      submitResponse = await fetch(`${INTELLECT.baseUrl}/magicplatform/v1/invokeasset/${INTELLECT.assetId}/usecase`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

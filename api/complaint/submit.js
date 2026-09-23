@@ -29,10 +29,10 @@ export default async function handler(req, res) {
   const accountNum = accountNumber || 'AC1000234567';
   const emailBody = `${complaintDetails.trim()}\n\nAccount Number: ${accountNum}`;
 
-  const apikey = process.env.INTELLECT_API_KEY || 'magicplatform.A8018652167E463eaD986C222F2A42D4';
-  const workspaceId = process.env.INTELLECT_WORKSPACE_ID || 'd7d4d536-de17-4354-819a-fff06ba78b23';
-  const username = process.env.INTELLECT_USERNAME || 'shivanshpf_indstg';
-  const password = process.env.INTELLECT_PASSWORD || 'Intellect@8012';
+  const apikey = process.env.INTELLECT_API_KEY || '';
+  const workspaceId = process.env.INTELLECT_WORKSPACE_ID || '';
+  const username = process.env.INTELLECT_USERNAME || '';
+  const password = process.env.INTELLECT_PASSWORD || '';
 
   const fetchToken = async () => {
     const tokenRes = await fetch('https://api.in.intellectseecstag.com/accesstoken/pfpreview', {
