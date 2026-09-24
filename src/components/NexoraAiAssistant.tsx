@@ -829,6 +829,7 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
         onTapOrb={() => {
           if (voice.paused) voice.setPaused(false);
           else if (voice.speaking) voice.skip();
+          else if (voice.micMuted) return; // muted: the orb never opens the mic
           else if (voice.listening) voice.stopListening();
           else {
             voice.unlockAudio();

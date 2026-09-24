@@ -289,7 +289,16 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
   const setMicMuted = useCallback((v: boolean) => {
     micMutedRef.current = v;
     setMicMutedState(v);
-    if (v) stopListeningRef.current();
+    if (v) {
+      // throw away whatever was being captured — a muted mic must not send anything
+      if (recRef.current) recRef.current.__discard = true;
+      try {
+        recRef.current?.abort();
+      } catch {
+        /* ignore */
+      }
+      stopListeningRef.current();
+    }
     else if (handsFreeRef.current && !pausedRef.current && !playingRef.current && queueRef.current.length === 0) startListeningRef.current({ bargeIn: false });
   }, []);
 
@@ -437,7 +446,7 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
   const stopListeningRef = useRef<() => void>(() => {});
 
   const handleTranscript = useCallback((said: string) => {
-    if (pausedRef.current) return;
+    if (pausedRef.current || micMutedRef.current) return;
     if (said) {
       silentTurnsRef.current = 0;
       onTranscriptRef.current(said);
@@ -494,6 +503,7 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
         setListening(false);
         setInterim('');
         listeningRef.current = false;
+        if (micMutedRef.current) return;
         if (!heard || chunks.length === 0) return handleTranscript('');
         setTranscribing(true);
         try {
@@ -517,8 +527,8 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
 
   const startListening = useCallback(
     (o: { bargeIn?: boolean } = {}) => {
-      if (pausedRef.current || listeningRef.current) return;
-      if (micMutedRef.current && o.bargeIn === false) return; // auto-restarts wait for unmute; a deliberate tap still works
+      if (pausedRef.current || listeningRef.current || micMutedRef.current) return; // muted = no listening at all until unmute
+      void o;
       if (o.bargeIn !== false) stopSpeaking(); // the customer tapped or spoke over Zora — never transcribe her voice
       listeningRef.current = true;
       setInterim('');
@@ -562,6 +572,7 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
         listeningRef.current = false;
         setListening(false);
         setInterim('');
+        if (rec.__discard) return;
         handleTranscript(finalText.trim());
       };
 
@@ -615,7 +626,7 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
       if (v) {
         stopListening();
         stopSpeaking();
-      } else if (handsFreeRef.current) {
+      } else if (handsFreeRef.current && !micMutedRef.current) {
         unlockAudio();
         startListeningRef.current({ bargeIn: true });
       }
