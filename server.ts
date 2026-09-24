@@ -1013,7 +1013,32 @@ Select your preferred payment method below to proceed.`;
       return { text: fallbackReply, intent: detectedIntent, action: null, display: [] };
     };
 
-    return { userQuery, contents, fullSystem, detectIntent, computeFallback };
+    /** Server-side sanity check so Zora never announces something the ledger will refuse. */
+    const checkAction = (action: ChatAction | null): { ok: true } | { ok: false; message: string; options: string[] } => {
+      if (!action) return { ok: true };
+      const savingsBalance = dashboard?.accounts?.find((a) => a.type === "Savings")?.balance ?? 124560.5;
+      if (action.type === "OPEN_FD") {
+        const amt = Number(action.params.amount) || 0;
+        if (amt < 10000) return { ok: false, message: `The minimum fixed deposit is ₹10,000. How much would you like to deposit?`, options: ["₹10,000", "₹25,000", "₹50,000"] };
+        if (amt > savingsBalance) {
+          const suggest = Math.max(10000, Math.floor(savingsBalance / 5000) * 5000);
+          return {
+            ok: false,
+            message: `I couldn't book that — your savings account has ${fmt(savingsBalance)}, which isn't enough for a ${fmt(amt)} deposit. Would you like a smaller amount?`,
+            options: savingsBalance >= 10000 ? [`₹${suggest.toLocaleString("en-IN")}`, `₹${Math.max(10000, Math.floor(savingsBalance / 2 / 1000) * 1000).toLocaleString("en-IN")}`, "Not now"] : ["Not now"],
+          };
+        }
+      }
+      if (action.type === "PAY_CARD" && action.params.method !== "qr") {
+        const amt = Number(action.params.amount) || 0;
+        if (amt > savingsBalance) {
+          return { ok: false, message: `Your savings account has ${fmt(savingsBalance)}, which isn't enough to pay ${fmt(amt)}. Would you like a smaller amount, or a QR to pay from another account?`, options: [`Pay ${fmt(Math.min(cardMinDue, savingsBalance))}`, "Show a QR", "Not now"] };
+        }
+      }
+      return { ok: true };
+    };
+
+    return { userQuery, contents, fullSystem, detectIntent, computeFallback, checkAction };
 }
 
 const stripIntentTags = (t: string) => t.replace(/\[(?:INTENT|ACTION|SHOW|OPTIONS):[^\]]*\]/g, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
@@ -1092,22 +1117,32 @@ app.post("/api/ai/chat", async (req, res) => {
     });
     const replyText = response.text || "";
     if (!replyText.trim()) throw new Error(`Empty reply from ${model}`);
-    const cleanedText = stripIntentTags(replyText);
+    let cleanedText = stripIntentTags(replyText);
+    let action = parseAction(replyText);
+    let options = parseOptions(replyText);
+    const check = prep.checkAction(action);
+    if (check.ok === false) {
+      cleanedText = check.message;
+      options = check.options;
+      action = null;
+    }
     return res.json({
       success: true,
       text: cleanedText,
       reply: cleanedText,
-      intent: prep.detectIntent(replyText),
-      action: parseAction(replyText),
-      display: parseDisplayBlocks(replyText),
-      options: parseOptions(replyText),
+      intent: action ? null : prep.detectIntent(replyText),
+      action,
+      display: check.ok ? parseDisplayBlocks(replyText) : [],
+      options,
       card: coreCreditCard,
       source: "gemini",
       model,
     });
   } catch (err: any) {
     console.warn("[India Bank AI Chat] Fallback to banking context model:", String(err?.message || err).slice(0, 200));
-    const fb = prep.computeFallback();
+    const fb0 = prep.computeFallback();
+    const fbCheck = prep.checkAction(fb0.action);
+    const fb = fbCheck.ok === false ? { ...fb0, text: fbCheck.message, action: null, options: fbCheck.options, display: [] } : fb0;
     return res.json({
       success: true,
       text: fb.text,
@@ -1230,10 +1265,20 @@ app.post("/api/ai/chat/stream", async (req, res) => {
     }
     if (!usedModel) throw lastErr || new Error("No Gemini model available");
     pushDelta(true);
-    send({ done: true, intent: prep.detectIntent(full), action: parseAction(full), display: parseDisplayBlocks(full), options: parseOptions(full), card: coreCreditCard, source: "gemini", model: usedModel, text: stripIntentTags(full) });
+    const action = parseAction(full);
+    const check = prep.checkAction(action);
+    if (check.ok === false) {
+      // The model promised something the ledger cannot do — correct it out loud and drop the action.
+      send({ delta: `\n\n${check.message}` });
+      send({ done: true, intent: null, action: null, display: [], options: check.options, card: coreCreditCard, source: "gemini", model: usedModel, text: `${stripIntentTags(full)}\n\n${check.message}` });
+    } else {
+      send({ done: true, intent: prep.detectIntent(full), action, display: parseDisplayBlocks(full), options: parseOptions(full), card: coreCreditCard, source: "gemini", model: usedModel, text: stripIntentTags(full) });
+    }
   } catch (err: any) {
     console.warn("[India Bank AI Chat] stream fallback:", String(err?.message || err).slice(0, 200));
-    const fb = prep.computeFallback();
+    const fb0 = prep.computeFallback();
+    const fbCheck = prep.checkAction(fb0.action);
+    const fb = fbCheck.ok === false ? { ...fb0, text: fbCheck.message, action: null, options: fbCheck.options, display: [] } : fb0;
     if (!emitted) send({ start: true, model: "fallback" });
     send({ delta: fb.text });
     send({ done: true, intent: fb.intent, action: fb.action, display: fb.display, options: fb.options || [], card: coreCreditCard, source: "fallback", text: fb.text });

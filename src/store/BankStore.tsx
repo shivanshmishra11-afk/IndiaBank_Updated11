@@ -322,10 +322,25 @@ export const BankProvider: React.FC<{ children: React.ReactNode }> = ({ children
         accountId: from.id,
         channel: 'Internal',
       };
+      const now = Date.now();
+      const record: ServiceRequest = {
+        id: `SR${now.toString().slice(-8)}`,
+        type: `${acct.name} opened`,
+        details: `${number} · ${formatINR(amt)} · ${input.tenureMonths} months @ ${input.ratePct.toFixed(2)}% · matures ${acct.maturityDate}`,
+        status: 'Completed',
+        createdAt: now,
+        eta: 'Instant',
+        steps: [
+          { label: 'Request received', at: now },
+          { label: 'Funds debited', at: now },
+          { label: 'Deposit opened', at: now },
+        ],
+      };
       setLedger((prev) => ({
         ...prev,
         accounts: [...debitAccount(prev.accounts, from.id, amt), acct],
         transactions: [txn, ...prev.transactions],
+        requests: [record, ...prev.requests],
         notifications: [
           {
             id: uid('n'),
