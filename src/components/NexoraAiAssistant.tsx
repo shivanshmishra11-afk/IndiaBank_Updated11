@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { getDashboardSnapshot } from '../data/dashboardSnapshot';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   X,
@@ -177,7 +178,7 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
         const res = await fetch('/api/ai/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text, history, user }),
+          body: JSON.stringify({ message: text, history, user, dashboard: getDashboardSnapshot() }),
         });
         const data = await res.json();
         if (data?.card) setCard(data.card);

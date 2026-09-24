@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import { Home, Building2, CreditCard, Send, Grid } from 'lucide-react';
 import { UserSession, ComplaintTicket, BankAccount, Transaction, NavTab } from '../types';
 import { INITIAL_ACCOUNTS, INITIAL_TRANSACTIONS, SPENDING_INSIGHTS, CREDIT_SCORE } from '../data/mockData';
+import { publishDashboardSnapshot } from '../data/dashboardSnapshot';
 import { NexoraHeader } from './NexoraHeader';
 import { NexoraSidebar } from './NexoraSidebar';
 import { NexoraDashboard } from './NexoraDashboard';
@@ -57,6 +58,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ user, onNavigateTo
   useEffect(() => {
     document.getElementById('ib-main')?.scrollTo({ top: 0 });
   }, [activeTab]);
+
+  // Keep Zora in sync with what is on screen (balances after transfers, new transactions, current tab)
+  useEffect(() => {
+    publishDashboardSnapshot({ accounts, transactions, activeTab });
+  }, [accounts, transactions, activeTab]);
 
   const handleTransferCompleted = (amount: number, description: string, payee: string) => {
     setAccounts((prev) => prev.map((acc) => (acc.type === 'Savings' ? { ...acc, balance: Math.max(0, acc.balance - amount) } : acc)));

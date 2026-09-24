@@ -10,6 +10,7 @@ import dotenv from "dotenv";
 dotenv.config({ path: [".env.local", ".env"] });
 import { GoogleGenAI } from "@google/genai";
 import { ZORA_CATEGORIES, searchZoraKnowledge } from "./src/data/zoraKnowledge";
+import { buildBankingContext, type DashboardSnapshot } from "./src/data/bankingContext";
 
 
 const app = express();
@@ -30,6 +31,52 @@ if (!INTELLECT.apiKey || !INTELLECT.username || !INTELLECT.password || !INTELLEC
 
 // Initialize Google GenAI client
 const ai = new GoogleGenAI(process.env.GEMINI_API_KEY ? { apiKey: process.env.GEMINI_API_KEY } : {});
+if (!process.env.GEMINI_API_KEY) {
+  console.warn("[India Bank] GEMINI_API_KEY is not set — Zora will answer from built-in banking logic only.");
+}
+
+// Preferred model first; the rest are fallbacks for capacity (503) / quota (429) errors.
+const GEMINI_MODELS = (process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL] : []).concat([
+  "gemini-3.8-flash",
+  "gemini-3.6-flash",
+  "gemini-2.5-flash",
+]);
+
+const isTransientGeminiError = (err: any) => {
+  const msg = String(err?.message || "");
+  const code = err?.status ?? err?.code;
+  return [429, 500, 503].includes(Number(code)) || /"code":(429|500|503)|UNAVAILABLE|RESOURCE_EXHAUSTED|high demand|overloaded/i.test(msg);
+};
+
+/** Calls Gemini, walking down the model list when a model is overloaded or out of quota. */
+async function generateWithFallback(args: { contents: any[]; systemInstruction: string; temperature?: number; maxOutputTokens?: number }) {
+  let lastErr: any = null;
+  for (const model of GEMINI_MODELS) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: args.contents,
+          config: {
+            systemInstruction: args.systemInstruction,
+            temperature: args.temperature ?? 0.4,
+            maxOutputTokens: args.maxOutputTokens ?? 2048,
+            // Gemini 2.5/3.x count "thinking" tokens against the output budget; a chat reply
+            // grounded in supplied data does not need it, and it was truncating long answers.
+            thinkingConfig: { thinkingBudget: 0 },
+          },
+        });
+        return { response, model };
+      } catch (err: any) {
+        lastErr = err;
+        if (!isTransientGeminiError(err)) throw err;
+        console.warn(`[India Bank AI Chat] ${model} unavailable (attempt ${attempt + 1}): ${String(err?.message || err).slice(0, 140)}`);
+        if (attempt === 0) await new Promise((r) => setTimeout(r, 400));
+      }
+    }
+  }
+  throw lastErr || new Error("No Gemini model available");
+}
 
 app.use(express.json());
 
@@ -436,7 +483,12 @@ app.post("/api/payment/direct-pay", (req, res) => {
 
 // AI-Powered Real Banking Assistant powered by Gemini 3.8 Flash
 app.post("/api/ai/chat", async (req, res) => {
-  const { message, history = [], user, accounts = [] } = req.body;
+  const { message, history = [], user, dashboard } = req.body as {
+    message?: string;
+    history?: any[];
+    user?: { name?: string; email?: string };
+    dashboard?: DashboardSnapshot;
+  };
   const userQuery = (message || "").trim();
 
   if (!userQuery) {
@@ -469,7 +521,8 @@ app.post("/api/ai/chat", async (req, res) => {
     cleanQuery.includes("pay cc");
 
   // Distinct credit-card questions answered from the live ledger (not the generic pay guide)
-  const mentionsCard = /credit|card|\bcc\b/.test(cleanQuery);
+  // "credit card", "card", "cc", or "credit limit" — but not "salary credit" / "interest credit"
+  const mentionsCard = /credit ?card|\bcard\b|\bcc\b|credit (limit|bill|due|statement)/.test(cleanQuery);
   const isPenaltyQuery = /penalt|late fee|late payment|finance charge|interest.*(card|due|bill)|miss.*(payment|due)|not pay|don'?t pay|charged/.test(cleanQuery);
   const isUpdatesQuery = /update|what'?s new|anything new|notification|alert|remind|pending for me|anything (i|for me)/.test(cleanQuery);
   const isCardDueQuery =
@@ -499,54 +552,32 @@ app.post("/api/ai/chat", async (req, res) => {
       : `fully paid, nothing due${coreCreditCard.lastUtr ? ` (last payment UTR ${coreCreditCard.lastUtr})` : ""}`
   }\n• Salary: ₹75,000.00 credited on 15 May 2026 from ABC Corp\n• Fixed deposit FD8829109101 (₹5,00,000) matures on 12 Sep 2026 — high-yield reinvestment at 6.75% is available\n• Personal loan PL882910: EMI of ₹18,450 auto-debits on the 1st; 22 EMIs remaining\n• Rewards: 14,250 points (worth about ₹3,562) ready to redeem\n• Offer: special FD rate of 6.75% p.a. valid till 30 Sep 2026\n\nTell me which one you'd like to act on.`;
 
-  const systemInstruction = `You are Zora, the premier AI Virtual Banking Assistant for India Bank NetBanking.
-Customer Name: ${userName} (${userEmail})
-Customer ID: CUST-INB-7729104
+  const bankingContext = buildBankingContext(dashboard, coreCreditCard, { userName, userEmail });
 
-REAL-TIME CORE BANKING REPOSITORY:
-1. Savings Account (Primary):
-   - A/C Number: AC1000231234
-   - Current Balance: ₹1,24,560.50
-   - Interest: 4.00% p.a. compounded quarterly
-   - Branch: Nariman Point, Mumbai (IFSC: INBA0001042)
-2. Current Account:
-   - A/C Number: AC1000235678
-   - Current Balance: ₹8,75,000.00
-3. Fixed Deposit (High Yield):
-   - FD Number: FD8829109101
-   - Deposit Principal: ₹5,00,000.00
-   - Interest: 6.75% p.a.
-   - Maturity Date: 12 Sep 2026 (Projected: ₹5,34,500.00)
-4. Nexora Royale Infinite Credit Card:
-   - Card Number: 4532 •••• •••• 8842
-   - Credit Limit: ₹${cardLimit.toLocaleString('en-IN')}
-   - Available Credit: ₹${cardAvailable.toLocaleString('en-IN')}
-   - Outstanding Due: ₹${cardOutstanding.toLocaleString('en-IN')}
-   - Minimum Due: ₹${cardMinDue.toLocaleString('en-IN')}
-   - Due Date: ${cardDueDate}
-   - Reward Points: 14,250 points
-5. Smart Personal Loan:
-   - Loan Account: PL882910
-   - Original Sanction: ₹8,00,000.00
-   - Outstanding Principal: ₹3,42,100.00
-   - Monthly EMI: ₹18,450.00 (Due 1st of every month)
-   - Interest Rate: 10.50% p.a. (22 months remaining)
-6. Wealth & Mutual Funds:
-   - Portfolio Value: ₹8,14,200.00 (Invested: ₹6,50,000.00, Profit: +₹1,64,200.00 / +25.2%)
+  const systemInstruction = `You are Zora, the AI banking assistant inside India Bank NetBanking. You are talking to ${userName}, who is logged in and looking at their dashboard.
 
-CRITICAL DESIGN & WRITING RULES:
-- Never write raw unrendered formatting syntax or messy hashtags. Write clean, natural prose and clean bullet points (•).
-- When mentioning amounts, always prefix with ₹ and format with standard commas.
-- Be context-aware, helpful, and natural.
-- If the customer asks about their overall account summary, portfolio, or all accounts:
-  Summarize each product cleanly with balance and highlights. At the end, state that they can tap any product below for deeper insights. Include [INTENT:ACCOUNT_SUMMARY] at the end.
-- If the customer asks to pay credit card bill:
-  Mention the current outstanding amount ₹${cardOutstanding.toLocaleString('en-IN')}, and explain the 3 payment channels (Savings Account Direct Debit, Debit Card, Dynamic QR Code). Include [INTENT:PAY_CREDIT_CARD] at the end.
-- If user asks about a specific product (Savings, FD, Loan, Credit Card, Mutual Funds), provide deep and transparent details for that specific product.
-- Credit card questions must be answered specifically, never with a generic guide:
-  • "What is my due?" → list total outstanding, minimum due, due date (${dueLine}), available credit and billing cycle, then offer to pay.
-  • "What penalty / late fee?" → late fee slabs (₹1,300 above ₹50,000; ₹750 for ₹10,001–₹50,000; ₹500 for ₹1,001–₹10,000), finance charge 3.49% per month (41.88% p.a.), 18% GST, CIBIL reporting after 30 days; relate it to their actual due.
-  • "Any updates for me?" → summarise the card statement and due date, the FD maturing 12 Sep 2026, the salary credit, the loan EMI, reward points and current offers.`;
+Answer from the CUSTOMER DATA below — it is the exact information shown on their screen and in the live core-banking ledger. Never invent balances, dates, transactions, rates or offers that are not in it. If something is not in the data (for example a different bank's account, a cheque status, or branch timings), say you do not have it and point them to the relevant section or to the grievance desk. Do not give investment or tax advice beyond describing what they hold.
+
+===== CUSTOMER DATA =====
+${bankingContext}
+===== END CUSTOMER DATA =====
+
+HOW TO WRITE:
+- Warm, concise, professional — like a good relationship manager. Use the customer's first name occasionally, not every sentence.
+- Plain text only: no markdown headings, no hashtags, no tables, no code. Use short paragraphs and clean bullet points (•) for lists. Bold is allowed sparingly with **double asterisks** for a key figure.
+- Every amount is prefixed with ₹ and formatted with Indian commas (₹1,24,560.50). Quote the exact figures from the data.
+- Keep most replies under 120 words; go longer only for a full summary or a step-by-step guide.
+- Do the arithmetic when it helps (days until due, amount left after paying the minimum, EMIs left, utilisation) and show the numbers.
+- End with one natural next step or question when it makes sense.
+
+INTENT TAGS — append exactly one of these at the very end of the reply when it applies (the app turns it into an interactive panel; the tag itself is hidden from the customer):
+- [INTENT:ACCOUNT_SUMMARY] when they ask for an overview / summary / portfolio / all accounts. Summarise each product with its balance and one highlight, then mention they can tap a product below for details.
+- [INTENT:PAY_CREDIT_CARD] when they want to pay the credit card bill. State the total due ${cardOutstanding > 0 ? `(${fmt(cardOutstanding)}), the minimum (${fmt(cardMinDue)}) and the due date` : "(nothing is due right now)"}, and say they can choose full, minimum or a custom amount and pay via Savings direct debit, a debit card with OTP, or a dynamic QR — the panel below the message lets them do it.
+- [INTENT:CARD_DUE] when they ask what is due, the outstanding, statement, limit, or about penalties / late fees on the card. Give the specific figures (and for penalties, relate the fee slab to their actual due).
+- [INTENT:UPDATES] when they ask "any updates / what's new / reminders". Summarise: card statement and due date, upcoming loan EMI, the FD maturity, the latest salary credit, reward points, and one or two current offers.
+- No tag for anything else.
+
+Payment channels you can offer for the card: Savings account direct debit, any debit card verified with an OTP, or a single-use dynamic QR the customer can scan from any phone or UPI app. Never ask for card numbers, CVV, PINs, OTPs or passwords in chat.`;
 
   try {
     if (!process.env.GEMINI_API_KEY) {
@@ -573,28 +604,26 @@ CRITICAL DESIGN & WRITING RULES:
       parts: [{ text: userQuery }],
     });
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.8-flash",
+    const { response, model } = await generateWithFallback({
       contents,
-      config: {
-        systemInstruction: `${systemInstruction}
-${matchedGuide ? `\nOFFICIAL BANKING GUIDE REFERENCE FOR THIS INQUIRY:\n${matchedGuide.question}\nAnswer: ${matchedGuide.answer}` : ''}`,
-        temperature: 0.5,
-        maxOutputTokens: 1000,
-      },
+      systemInstruction: `${systemInstruction}
+${matchedGuide ? `\nOFFICIAL BANKING GUIDE REFERENCE FOR THIS INQUIRY (use it for procedure, keep the figures from CUSTOMER DATA):\n${matchedGuide.question}\nAnswer: ${matchedGuide.answer}` : ''}`,
+      temperature: 0.4,
+      maxOutputTokens: 1000,
     });
 
     const replyText = response.text || "";
+    if (!replyText.trim()) throw new Error(`Empty reply from ${model}`);
 
-    let detectedIntent: string | null = null;
-    if (replyText.includes("[INTENT:ACCOUNT_SUMMARY]") || isSummaryQuery) {
-      detectedIntent = "ACCOUNT_SUMMARY";
-    } else if (replyText.includes("[INTENT:PAY_CREDIT_CARD]") || isCardPayQuery) {
-      detectedIntent = "PAY_CREDIT_CARD";
-    } else if (isUpdatesQuery) {
-      detectedIntent = "UPDATES";
-    } else if (isCardDueQuery || isPenaltyQuery) {
-      detectedIntent = "CARD_DUE";
+    // The model tags the intent from the full context; the keyword detectors are only a
+    // safety net for replies where it forgot the tag.
+    const tagged = replyText.match(/\[INTENT:(ACCOUNT_SUMMARY|PAY_CREDIT_CARD|CARD_DUE|UPDATES)\]/)?.[1] || null;
+    let detectedIntent: string | null = tagged;
+    if (!detectedIntent) {
+      if (isSummaryQuery) detectedIntent = "ACCOUNT_SUMMARY";
+      else if (isCardPayQuery) detectedIntent = "PAY_CREDIT_CARD";
+      else if (isUpdatesQuery) detectedIntent = "UPDATES";
+      else if (isCardDueQuery || isPenaltyQuery) detectedIntent = "CARD_DUE";
     }
 
     const cleanedText = replyText
@@ -607,9 +636,11 @@ ${matchedGuide ? `\nOFFICIAL BANKING GUIDE REFERENCE FOR THIS INQUIRY:\n${matche
       reply: cleanedText,
       intent: detectedIntent,
       card: coreCreditCard,
+      source: "gemini",
+      model,
     });
   } catch (err: any) {
-    console.warn("[India Bank AI Chat] Fallback to banking context model:", err.message);
+    console.warn("[India Bank AI Chat] Fallback to banking context model:", String(err?.message || err).slice(0, 200));
 
     const kbResult = searchZoraKnowledge(userQuery);
     const matchedGuide = kbResult?.matchedQuestion;
@@ -676,6 +707,7 @@ Select your preferred payment method below to proceed.`;
       text: fallbackReply,
       reply: fallbackReply,
       intent: detectedIntent,
+      source: "fallback",
       card: coreCreditCard,
       fallback: true,
     });
