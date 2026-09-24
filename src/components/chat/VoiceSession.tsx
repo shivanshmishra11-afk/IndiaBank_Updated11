@@ -22,7 +22,8 @@ interface VoiceSessionProps {
   onOption: (choice: string) => void;
   micAvailable: boolean;
   audioBlocked: boolean;
-  muted: boolean;
+  /** the customer's mic is muted — Zora keeps talking, listening resumes on unmute */
+  micMuted: boolean;
   onToggleMute: () => void;
   onTapOrb: () => void;
   onTogglePause: () => void;
@@ -41,7 +42,7 @@ const STATUS: Record<OrbState, string> = {
   paused: 'Paused',
 };
 
-export const VoiceSession: React.FC<VoiceSessionProps> = ({ open, state, caption, outcomes, options, onOption, micAvailable, audioBlocked, muted, onToggleMute, onTapOrb, onTogglePause, onEnableAudio, onEnd, onPay, onQrPaid, onOpenSimulator }) => {
+export const VoiceSession: React.FC<VoiceSessionProps> = ({ open, state, caption, outcomes, options, onOption, micAvailable, audioBlocked, micMuted, onToggleMute, onTapOrb, onTogglePause, onEnableAudio, onEnd, onPay, onQrPaid, onOpenSimulator }) => {
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -123,10 +124,16 @@ export const VoiceSession: React.FC<VoiceSessionProps> = ({ open, state, caption
 
             <motion.div key={state} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} className="mt-5 inline-flex items-center gap-2 h-8 px-3.5 rounded-full bg-white/80 border border-slate-200/80 text-[13px] font-semibold text-slate-700 shadow-sm">
               {state === 'listening' && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />}
-              {speaking && (muted ? <VolumeX className="w-3.5 h-3.5 text-slate-400" /> : <Volume2 className="w-3.5 h-3.5 text-indigo-600" />)}
+              {speaking && <Volume2 className="w-3.5 h-3.5 text-indigo-600" />}
               {state === 'thinking' && <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />}
               {paused && <Pause className="w-3.5 h-3.5 text-slate-500" />}
-              {STATUS[state]}
+              {state === 'idle' && micMuted ? (
+                <>
+                  <MicOff className="w-3.5 h-3.5 text-amber-600" /> Your mic is muted
+                </>
+              ) : (
+                STATUS[state]
+              )}
               {speaking && (
                 <span className="ml-1 text-[11px] font-medium text-slate-400 inline-flex items-center gap-1">
                   · tap orb to skip <SkipForward className="w-3 h-3" />
@@ -182,20 +189,21 @@ export const VoiceSession: React.FC<VoiceSessionProps> = ({ open, state, caption
             </button>
             <button
               onClick={onToggleMute}
-              aria-pressed={muted}
-              title={muted ? 'Unmute Zora' : 'Mute Zora (session continues)'}
-              className={`w-12 h-12 rounded-full inline-flex items-center justify-center border transition-colors cursor-pointer active:scale-95 shadow-sm ${muted ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'}`}
+              aria-pressed={micMuted}
+              title={micMuted ? 'Unmute your mic — Zora starts listening again' : 'Mute your mic — Zora keeps talking, stops listening'}
+              className={`h-12 px-4 rounded-full inline-flex items-center gap-2 text-sm font-semibold border transition-colors cursor-pointer active:scale-95 shadow-sm ${micMuted ? 'bg-amber-50 text-amber-800 border-amber-200' : 'bg-white text-slate-800 border-slate-200 hover:bg-slate-50'}`}
             >
-              {muted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+              {micMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+              {micMuted ? 'Unmute' : 'Mute'}
             </button>
             <button
               onClick={onTapOrb}
-              disabled={paused}
+              disabled={paused || micMuted}
               aria-pressed={state === 'listening'}
               className={`w-14 h-14 rounded-full inline-flex items-center justify-center border transition-colors cursor-pointer active:scale-95 shadow-md disabled:opacity-40 ${state === 'listening' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-slate-900 text-white border-slate-900 hover:bg-slate-800'}`}
-              title={state === 'listening' ? 'Stop listening' : 'Talk'}
+              title={speaking ? 'Skip ahead' : state === 'listening' ? 'Stop listening' : 'Talk'}
             >
-              <Mic className="w-5 h-5" />
+              {speaking ? <SkipForward className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
             </button>
             <button onClick={onEnd} className="h-12 px-5 rounded-full inline-flex items-center gap-2 text-sm font-semibold bg-white text-rose-700 border border-rose-200 hover:bg-rose-50 transition-colors cursor-pointer active:scale-95 shadow-sm">
               <PhoneOff className="w-4 h-4" /> End

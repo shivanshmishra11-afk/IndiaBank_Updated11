@@ -102,8 +102,10 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
   const [transcribing, setTranscribing] = useState(false);
   const [paused, setPaused] = useState(false);
   const [audioBlocked, setAudioBlocked] = useState(false);
-  const [muted, setMutedState] = useState(false);
+  const [muted, setMutedState] = useState(false); // speaker (unused by the UI, kept for completeness)
   const mutedRef = useRef(false);
+  const [micMuted, setMicMutedState] = useState(false); // the customer's mic: Zora keeps talking, just stops listening
+  const micMutedRef = useRef(false);
   const skipRef = useRef<(() => void) | null>(null);
   const [voiceReplies, setVoiceRepliesState] = useState<boolean>(false); // on only inside the voice session
   const [handsFree, setHandsFreeState] = useState(false);
@@ -283,6 +285,14 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
     if (v && synthesisSupported) window.speechSynthesis.cancel();
   }, [synthesisSupported]);
 
+  /** Mute the customer's mic. Zora finishes what she is saying; listening resumes on unmute. */
+  const setMicMuted = useCallback((v: boolean) => {
+    micMutedRef.current = v;
+    setMicMutedState(v);
+    if (v) stopListeningRef.current();
+    else if (handsFreeRef.current && !pausedRef.current && !playingRef.current && queueRef.current.length === 0) startListeningRef.current({ bargeIn: false });
+  }, []);
+
   /** Jump to the next sentence (or finish, if this was the last one). */
   const skip = useCallback(() => {
     skipRef.current?.();
@@ -424,6 +434,7 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
   }, []);
 
   const startListeningRef = useRef<(opts?: { bargeIn?: boolean }) => void>(() => {});
+  const stopListeningRef = useRef<() => void>(() => {});
 
   const handleTranscript = useCallback((said: string) => {
     if (pausedRef.current) return;
@@ -433,7 +444,7 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
     } else if (handsFreeRef.current) {
       // nothing heard — listen again a couple of times, then rest until tapped
       silentTurnsRef.current += 1;
-      if (silentTurnsRef.current <= 2) setTimeout(() => !pausedRef.current && !playingRef.current && startListeningRef.current({ bargeIn: false }), 250);
+      if (silentTurnsRef.current <= 2) setTimeout(() => !pausedRef.current && !micMutedRef.current && !playingRef.current && startListeningRef.current({ bargeIn: false }), 250);
       else silentTurnsRef.current = 0;
     }
   }, []);
@@ -507,6 +518,7 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
   const startListening = useCallback(
     (o: { bargeIn?: boolean } = {}) => {
       if (pausedRef.current || listeningRef.current) return;
+      if (micMutedRef.current && o.bargeIn === false) return; // auto-restarts wait for unmute; a deliberate tap still works
       if (o.bargeIn !== false) stopSpeaking(); // the customer tapped or spoke over Zora — never transcribe her voice
       listeningRef.current = true;
       setInterim('');
@@ -564,6 +576,7 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
     [stopSpeaking, recorderSupported, listenWithRecorder, handleTranscript]
   );
   startListeningRef.current = startListening;
+  stopListeningRef.current = stopListening;
 
   /* ---------------- hands-free session ---------------- */
 
@@ -577,6 +590,8 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
       setHandsFreeState(v);
       pausedRef.current = false;
       setPaused(false);
+      micMutedRef.current = false;
+      setMicMutedState(false);
       silentTurnsRef.current = 0;
       if (v) {
         unlockAudio();
@@ -610,8 +625,8 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
 
   // When Zora finishes speaking in hands-free mode, open the mic again.
   onIdleRef.current = () => {
-    if (handsFreeRef.current && !pausedRef.current && !listeningRef.current) {
-      setTimeout(() => handsFreeRef.current && !pausedRef.current && !listeningRef.current && !playingRef.current && startListeningRef.current({ bargeIn: false }), 200);
+    if (handsFreeRef.current && !pausedRef.current && !micMutedRef.current && !listeningRef.current) {
+      setTimeout(() => handsFreeRef.current && !pausedRef.current && !micMutedRef.current && !listeningRef.current && !playingRef.current && startListeningRef.current({ bargeIn: false }), 200);
     }
   };
 
@@ -635,6 +650,8 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
     audioBlocked,
     muted,
     setMuted,
+    micMuted,
+    setMicMuted,
     skip,
     listening,
     interim,

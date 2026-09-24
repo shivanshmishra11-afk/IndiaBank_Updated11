@@ -821,8 +821,8 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
           voice.stopSpeaking();
           send(choice);
         }}
-        muted={voice.muted}
-        onToggleMute={() => voice.setMuted(!voice.muted)}
+        micMuted={voice.micMuted}
+        onToggleMute={() => voice.setMicMuted(!voice.micMuted)}
         outcomes={voiceOutcomes}
         micAvailable={voice.recognitionSupported}
         audioBlocked={voice.audioBlocked}
