@@ -26,7 +26,8 @@ import { safeStorage } from '../utils/storage';
 import { publishDashboardSnapshot } from '../data/dashboardSnapshot';
 import { formatINR } from '../utils/format';
 
-const STORAGE_KEY = 'indiabank_ledger_v1';
+const STORAGE_KEY = 'indiabank_ledger_v2';
+const SAVINGS_FLOOR = 100000; // demo: Savings is kept at about ₹1 lakh so every walkthrough can book, pay and transfer
 const BENEFICIARY_COOLING_MS = 45_000; // real banks use 24h; shortened so the demo can be walked end-to-end
 
 /* ------------------------------------------------------------------ */
@@ -147,12 +148,45 @@ function seedLedger(): PersistedLedger {
   };
 }
 
+/**
+ * If earlier demos have drained Savings below ₹1 lakh, a salary credit lands on load — the way
+ * a real month-end would — so the balance stays around ₹1 lakh for the next walkthrough.
+ */
+function topUpSavings(ledger: PersistedLedger): PersistedLedger {
+  const savings = ledger.accounts.find((a) => a.type === 'Savings');
+  if (!savings || savings.balance >= SAVINGS_FLOOR) return ledger;
+  const amount = Math.ceil((SAVINGS_FLOOR + 24560.5 - savings.balance) / 500) * 500;
+  const txn: Transaction = {
+    id: uid('txn'),
+    ...dateDaysAgo(0),
+    description: 'Salary Credit from ABC Corp - Monthly Salary',
+    merchant: 'Salary Credit from ABC Corp',
+    category: 'Salary',
+    amount,
+    type: 'credit',
+    status: 'Completed',
+    reference: `NEFT-SAL${Date.now().toString().slice(-7)}`,
+    iconType: 'salary',
+    accountId: savings.id,
+    channel: 'NEFT',
+  };
+  return {
+    ...ledger,
+    accounts: ledger.accounts.map((a) => (a.id === savings.id ? { ...a, balance: +(a.balance + amount).toFixed(2) } : a)),
+    transactions: [txn, ...ledger.transactions],
+    notifications: [
+      { id: uid('n'), title: 'Salary credited', body: `${formatINR(amount)} received via NEFT from ABC Corp.`, kind: 'credit' as const, at: Date.now(), read: false, tab: 'statements' as NavTab },
+      ...ledger.notifications,
+    ].slice(0, 60),
+  };
+}
+
 function loadLedger(): PersistedLedger {
   try {
     const raw = safeStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as PersistedLedger;
-      if (parsed && Array.isArray(parsed.accounts) && Array.isArray(parsed.transactions)) return parsed;
+      if (parsed && Array.isArray(parsed.accounts) && Array.isArray(parsed.transactions)) return topUpSavings(parsed);
     }
   } catch {
     /* corrupt or blocked storage — start fresh */
