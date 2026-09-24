@@ -24,6 +24,7 @@ import {
   Square,
   Volume2,
   VolumeX,
+  Headphones,
 } from 'lucide-react';
 import { useVoice } from './chat/useVoice';
 import { UserSession, CoreCreditCard, PaymentSession, NavTab } from '../types';
@@ -32,6 +33,10 @@ import { ZoraMark } from './ui/Primitives';
 import { StreamingText, TypingIndicator, RichText } from './chat/ChatText';
 import { ChatPaymentFlow, PaymentReceipt } from './chat/ChatPaymentFlow';
 import { MobilePhoneSimulatorModal } from './chat/MobilePhoneSimulatorModal';
+import { OutcomeCard, Outcome } from './chat/OutcomeCard';
+import { VoiceSession, OrbState } from './chat/VoiceSession';
+import { useBank } from '../store/BankStore';
+import { rateFor, fdMaturity, FD_MIN_AMOUNT } from '../data/depositRates';
 import { formatINR, firstName } from '../utils/format';
 
 /* ------------------------------------------------------------------ */
@@ -50,9 +55,37 @@ interface ChatMsg {
   id: string;
   role: 'user' | 'zora';
   text: string;
+  /** canned reply revealing word by word */
   streaming?: boolean;
+  /** live answer still arriving from the model */
+  live?: boolean;
   attachment?: Attachment;
+  /** final result shown as a card (and in the voice session) */
+  outcome?: Outcome;
 }
+
+interface ChatAction {
+  type: 'OPEN_FD' | 'CHEQUE_BOOK' | 'PAY_CARD' | 'REQUEST';
+  params: Record<string, string>;
+}
+
+const REQUEST_TYPES: Record<string, { label: string; eta: string }> = {
+  address_update: { label: 'Address update', eta: '3 working days' },
+  mobile_update: { label: 'Mobile number update', eta: '1 working day' },
+  nominee_update: { label: 'Nominee update', eta: '2 working days' },
+  stop_cheque: { label: 'Stop cheque', eta: 'Instant' },
+  balance_letter: { label: 'Balance confirmation letter', eta: '1 working day' },
+  locker: { label: 'Safe deposit locker', eta: '2 working days' },
+  tds_certificate: { label: 'Interest & TDS certificate', eta: 'Instant' },
+  statement: { label: 'Account statement', eta: 'Instant' },
+};
+
+const plainText = (t: string) =>
+  t
+    .replace(/\*\*/g, '')
+    .replace(/^\s*[•\-*]\s+/gm, '')
+    .replace(/\s*\n+\s*/g, ' ')
+    .trim();
 
 interface NexoraAiAssistantProps {
   isOpen: boolean;
@@ -115,12 +148,14 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
   const [showGuide, setShowGuide] = useState(false);
   const [guideCategory, setGuideCategory] = useState<string | null>(null);
   const [simulatorTxn, setSimulatorTxn] = useState<string | null>(null);
+  const [voiceSession, setVoiceSession] = useState(false);
+  const bank = useBank();
   const [externalReceipts, setExternalReceipts] = useState<Record<string, PaymentReceipt>>({});
   const activeQrFlow = useRef<{ flowId: string; session: PaymentSession } | null>(null);
 
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const streamingSomething = messages.some((m) => m.streaming);
+  const streamingSomething = messages.some((m) => m.streaming || m.live);
   const busy = thinking || streamingSomething;
 
   const scrollToBottom = useCallback(() => {
@@ -149,18 +184,77 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
   // Voice: what the customer says is sent as a message; Zora's replies can be read aloud
   const sendRef = useRef<(t: string) => void>(() => {});
   const voice = useVoice({ onTranscript: (t) => sendRef.current(t) });
-  const { speak, stopSpeaking } = voice;
+  const { speak, stopSpeaking, beginUtterance } = voice;
 
   useEffect(() => {
     if (!isOpen) stopSpeaking();
   }, [isOpen, stopSpeaking]);
 
   const pushZora = useCallback(
-    (text: string, attachment?: Attachment) => {
-      setMessages((prev) => [...prev, { id: uid(), role: 'zora', text, streaming: true, attachment }]);
+    (text: string, attachment?: Attachment, outcome?: Outcome) => {
+      setMessages((prev) => [...prev, { id: uid(), role: 'zora', text, streaming: true, attachment, outcome }]);
       speak(text);
     },
     [speak]
+  );
+
+  const setOutcome = useCallback((msgId: string, outcome: Outcome) => {
+    setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, outcome } : m)));
+  }, []);
+
+  /** Executes an action Zora committed to (after the customer confirmed) and pins the result to the message. */
+  const runAction = useCallback(
+    async (action: ChatAction, msgId: string) => {
+      const p = action.params;
+      try {
+        if (action.type === 'OPEN_FD') {
+          const amount = Number(p.amount);
+          const months = Math.max(3, Math.min(60, Number(p.months) || 12));
+          if (!amount || amount < FD_MIN_AMOUNT) return setOutcome(msgId, { type: 'error', title: 'Deposit not booked', body: `The minimum fixed deposit is ₹${FD_MIN_AMOUNT.toLocaleString('en-IN')}.` });
+          const ratePct = rateFor(months);
+          const acct = bank.openDeposit({ kind: 'FD', amount, tenureMonths: months, ratePct });
+          if (!acct) return setOutcome(msgId, { type: 'error', title: 'Deposit not booked', body: 'Insufficient balance in your savings account.' });
+          return setOutcome(msgId, { type: 'fd', account: acct, ratePct, maturityValue: fdMaturity(amount, months, ratePct) });
+        }
+        if (action.type === 'CHEQUE_BOOK') {
+          const leaves = ['25', '50', '100'].includes(p.leaves) ? p.leaves : '25';
+          const account = p.account === 'current' ? 'Current AC1000235678' : 'Savings AC1000231234';
+          const delivery = p.delivery === 'branch' ? 'Pickup at Nariman Point branch' : 'Registered address · 14B Marine Drive, Mumbai';
+          const req = bank.createRequest('Cheque book', `${leaves} leaves · ${account} · ${delivery}`, '4 working days');
+          return setOutcome(msgId, { type: 'request', request: req });
+        }
+        if (action.type === 'REQUEST') {
+          const meta = REQUEST_TYPES[p.type] || { label: (p.type || 'Service request').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase()), eta: '2 working days' };
+          const req = bank.createRequest(meta.label, p.note || 'Raised via Zora', meta.eta);
+          return setOutcome(msgId, { type: 'request', request: req });
+        }
+        if (action.type === 'PAY_CARD') {
+          const amount = Number(p.amount) || card?.outstandingBalance || 0;
+          if (amount <= 0) return setOutcome(msgId, { type: 'error', title: 'Nothing to pay', body: 'There is no outstanding balance on the card.' });
+          if (p.method === 'qr') {
+            const res = await fetch('/api/payment/create-qr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ amount, origin: window.location.origin }) });
+            const data = await res.json();
+            if (!data?.success || !data.session) throw new Error('qr');
+            activeQrFlow.current = { flowId: msgId, session: data.session };
+            return setOutcome(msgId, { type: 'qr', session: data.session });
+          }
+          const res = await fetch('/api/payment/direct-pay', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount, method: 'India Bank Primary Savings (AC1000231234)', otp: '4920' }),
+          });
+          const data = await res.json();
+          if (!data?.success || !data.card) throw new Error('pay');
+          setCard(data.card);
+          seenReceipts.current.add(data.utr);
+          window.dispatchEvent(new CustomEvent('ib:card-updated'));
+          return setOutcome(msgId, { type: 'receipt', amount: data.amount, utr: data.utr, method: 'Savings account direct debit', card: data.card });
+        }
+      } catch {
+        setOutcome(msgId, { type: 'error', title: 'Could not complete that', body: 'The banking server did not respond. Please try again or use the Cards page.' });
+      }
+    },
+    [bank, card, setOutcome]
   );
 
   const send = useCallback(
@@ -174,46 +268,107 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
       setMessages((prev) => [...prev, { id: uid(), role: 'user', text }]);
       setThinking(true);
 
-      try {
-        const res = await fetch('/api/ai/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text, history, user, dashboard: getDashboardSnapshot() }),
-        });
-        const data = await res.json();
-        if (data?.card) setCard(data.card);
-        const reply: string = data?.text || data?.reply || 'I could not process that right now. Please try again.';
+      const attachmentFor = (intent: string | null | undefined, cardState: CoreCreditCard | null): Attachment | undefined => {
+        if (intent === 'PAY_CREDIT_CARD') return { kind: 'pay-flow', flowId: uid() };
+        if (intent === 'ACCOUNT_SUMMARY') return { kind: 'products' };
+        if (intent === 'CARD_DUE')
+          return (cardState?.outstandingBalance ?? 1) > 0
+            ? { kind: 'action', label: 'Pay this bill', type: 'pay_cc' }
+            : { kind: 'suggestions', items: ['Show my account summary', 'Any updates for me?'] };
+        if (intent === 'UPDATES')
+          return { kind: 'suggestions', items: ['Pay my credit card bill', 'Tell me about my fixed deposit', 'What penalty is charged if I miss the due date?'] };
+        const kb = searchZoraKnowledge(text);
+        const q = kb.matchedQuestion;
+        if (q?.actionType && q.actionLabel) return { kind: 'action', label: q.actionLabel, type: q.actionType };
+        return undefined;
+      };
 
-        let attachment: Attachment | undefined;
-        if (data?.intent === 'PAY_CREDIT_CARD') {
-          attachment = { kind: 'pay-flow', flowId: uid() };
-        } else if (data?.intent === 'ACCOUNT_SUMMARY') {
-          attachment = { kind: 'products' };
-        } else if (data?.intent === 'CARD_DUE') {
-          attachment =
-            (data?.card?.outstandingBalance ?? 1) > 0
-              ? { kind: 'action', label: 'Pay this bill', type: 'pay_cc' }
-              : { kind: 'suggestions', items: ['Show my account summary', 'Any updates for me?'] };
-        } else if (data?.intent === 'UPDATES') {
-          attachment = {
-            kind: 'suggestions',
-            items: ['Pay my credit card bill', 'Tell me about my fixed deposit', 'What penalty is charged if I miss the due date?'],
-          };
-        } else {
-          const kb = searchZoraKnowledge(text);
-          const q = kb.matchedQuestion;
-          if (q?.actionType && q.actionLabel) attachment = { kind: 'action', label: q.actionLabel, type: q.actionType };
+      const body = JSON.stringify({ message: text, history, user, dashboard: getDashboardSnapshot(), voice: voiceSession || voice.handsFree || voice.listening });
+      const msgId = uid();
+      const utterance = voice.voiceReplies ? beginUtterance() : null;
+      let started = false;
+      let full = '';
+
+      try {
+        // Stream the answer token by token; the first words land in a few hundred milliseconds.
+        const res = await fetch('/api/ai/chat/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+        if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        let finished = false;
+        while (!finished) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const frames = buf.split('\n\n');
+          buf = frames.pop() || '';
+          for (const frame of frames) {
+            const line = frame.split('\n').find((l) => l.startsWith('data: '));
+            if (!line) continue;
+            let evt: any;
+            try {
+              evt = JSON.parse(line.slice(6));
+            } catch {
+              continue;
+            }
+            if (evt.delta) {
+              if (!started) {
+                started = true;
+                setThinking(false);
+                setMessages((prev) => [...prev, { id: msgId, role: 'zora', text: '', live: true }]);
+              }
+              full += evt.delta;
+              utterance?.push(evt.delta);
+              setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, text: full } : m)));
+              scrollToBottom();
+            }
+            if (evt.done) {
+              finished = true;
+              if (evt.card) setCard(evt.card);
+              const finalText = (evt.text as string) || full || 'I could not process that right now. Please try again.';
+              const action: ChatAction | null = evt.action || null;
+              const attachment = action ? undefined : attachmentFor(evt.intent, evt.card || card);
+              let outcome: Outcome | undefined;
+              if (!action && evt.intent === 'CARD_DUE' && (evt.card || card)) outcome = { type: 'card-due', card: evt.card || card };
+              if (!action && evt.intent === 'ACCOUNT_SUMMARY') outcome = { type: 'summary', accounts: bank.accounts, card: evt.card || card };
+              if (!action && Array.isArray(evt.display) && evt.display.length) outcome = { type: 'facts', sections: evt.display };
+              setThinking(false);
+              if (!started) setMessages((prev) => [...prev, { id: msgId, role: 'zora', text: finalText, live: false, attachment, outcome }]);
+              else setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, text: finalText, live: false, attachment, outcome } : m)));
+              utterance?.end();
+              if (!utterance && !started) speak(finalText);
+              if (action) void runAction(action, msgId);
+            }
+          }
         }
-        // a short, deliberate pause reads as the model composing its answer
-        await new Promise((r) => setTimeout(r, 500 + Math.random() * 400));
-        setThinking(false);
-        pushZora(reply, attachment);
+        if (!finished) {
+          if (!started) throw new Error('stream ended early');
+          setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, live: false } : m)));
+          utterance?.end();
+        }
       } catch {
-        setThinking(false);
-        pushZora('I am having trouble reaching the banking servers. Please try again in a moment, or call 1800 202 6161.');
+        if (started) {
+          setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, live: false } : m)));
+          utterance?.end();
+          return;
+        }
+        utterance?.end();
+        // Streaming unavailable — one plain request instead
+        try {
+          const res = await fetch('/api/ai/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+          const data = await res.json();
+          if (data?.card) setCard(data.card);
+          const reply: string = data?.text || data?.reply || 'I could not process that right now. Please try again.';
+          setThinking(false);
+          pushZora(reply, attachmentFor(data?.intent, data?.card || card));
+        } catch {
+          setThinking(false);
+          pushZora('I am having trouble reaching the banking servers. Please try again in a moment, or call 1800 202 6161.');
+        }
       }
     },
-    [busy, messages, user, pushZora, stopSpeaking]
+    [busy, messages, user, card, pushZora, stopSpeaking, speak, beginUtterance, voice.voiceReplies, voice.handsFree, voice.listening, voiceSession, scrollToBottom, bank.accounts, runAction]
   );
   sendRef.current = send;
 
@@ -266,11 +421,35 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
     if (seenReceipts.current.has(r.utr)) return;
     seenReceipts.current.add(r.utr);
     setCard(r.card);
+    window.dispatchEvent(new CustomEvent('ib:card-updated'));
     pushZora(
-      `Done! I've received your payment of **${formatINR(r.amount)}** towards your ${r.card.cardName} (${r.card.maskedNumber}).\n\n• Paid via: ${r.method}\n• UTR reference: ${r.utr}\n• Updated outstanding: ${formatINR(r.card.outstandingBalance)}\n• Available credit: ${formatINR(r.card.availableCredit)}\n\nA confirmation SMS and e-receipt are on their way to your registered contacts. Anything else I can help with?`,
-      { kind: 'suggestions', items: ['Show my account summary', 'Download my statement', 'What are the FD rates?'] }
+      `Done! I've received your payment of **${formatINR(r.amount)}** towards your ${r.card.cardName} (${r.card.maskedNumber}). Your updated outstanding is ${formatINR(r.card.outstandingBalance)}. A confirmation SMS and e-receipt are on their way. Anything else I can help with?`,
+      { kind: 'suggestions', items: ['Show my account summary', 'Download my statement', 'What are the FD rates?'] },
+      { type: 'receipt', amount: r.amount, utr: r.utr, method: r.method, card: r.card }
     );
   };
+
+  const startVoiceSession = () => {
+    setShowGuide(false);
+    voice.unlockAudio(); // inside the tap, so the browser lets Zora speak
+    setVoiceSession(true);
+    voice.setHandsFree(true, { greeting: `Hi ${name}, this is Zora. I'm listening — how can I help you today?` });
+  };
+  const endVoiceSession = useCallback(() => {
+    setVoiceSession(false);
+    voice.setHandsFree(false);
+  }, [voice]);
+
+  const orbState: OrbState = voice.paused ? 'paused' : voice.listening ? 'listening' : voice.speaking ? 'speaking' : thinking || streamingSomething || voice.transcribing ? 'thinking' : 'idle';
+  const lastZoraMsg = [...messages].reverse().find((m) => m.role === 'zora' && !m.live)?.text;
+  // Only the outcome of the latest answer is shown; asking something new clears it.
+  const lastUserIdx = messages.map((m) => m.role).lastIndexOf('user');
+  const voiceOutcomes = messages
+    .slice(lastUserIdx + 1)
+    .filter((m) => m.role === 'zora' && m.outcome)
+    .reverse()
+    .slice(0, 1)
+    .map((m) => ({ id: m.id, outcome: m.outcome! }));
 
   const resetChat = () => {
     setMessages([
@@ -334,54 +513,34 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
           style={{ transformOrigin: 'bottom right' }}
         >
           {/* Header */}
-          <div className="px-4 py-3 border-b border-slate-100 bg-white flex items-center gap-3">
-            <span className={`relative rounded-full ${voice.speaking ? 'ring-4 ring-indigo-500/25 animate-pulse' : ''}`}>
-              <ZoraMark size={40} />
+          <div className="px-3.5 py-2.5 border-b border-slate-100 bg-white flex items-center gap-2.5">
+            <span className={`relative rounded-full shrink-0 ${voice.speaking ? 'ring-4 ring-indigo-500/25' : ''}`}>
+              <ZoraMark size={36} />
             </span>
             <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
                 <span className="text-sm font-bold text-slate-900">Zora</span>
-                <span className="hidden sm:inline text-[10px] font-bold uppercase tracking-wider text-indigo-700 bg-indigo-50 border border-indigo-100 px-1.5 py-0.5 rounded whitespace-nowrap">
-                  AI Assistant
-                </span>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-700 bg-indigo-50 border border-indigo-100 px-1.5 py-0.5 rounded whitespace-nowrap">AI</span>
               </div>
               <span className="text-[11px] text-slate-500 flex items-center gap-1 truncate">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
-                {voice.speaking ? 'Speaking…' : voice.listening ? 'Listening…' : 'India Bank · Secure session'}
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${voice.listening ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500'}`} />
+                {voice.speaking ? 'Speaking…' : voice.listening ? 'Listening…' : voice.transcribing ? 'Transcribing…' : thinking ? 'Thinking…' : 'Secure session · 24x7'}
               </span>
             </div>
-            {voice.synthesisSupported && (
+            {voice.recognitionSupported && voice.synthesisSupported && (
               <button
                 type="button"
-                role="switch"
-                aria-checked={voice.voiceReplies}
-                onClick={() => voice.setVoiceReplies(!voice.voiceReplies)}
-                title={voice.voiceReplies ? 'Voice replies on — click to mute' : 'Read replies aloud'}
-                className={`p-2 rounded-xl transition-colors cursor-pointer ${voice.voiceReplies ? 'bg-indigo-50 text-indigo-700' : 'text-slate-500 hover:bg-slate-100'}`}
+                onClick={startVoiceSession}
+                title="Talk to Zora — hands-free voice session"
+                className="h-9 pl-3 pr-3.5 rounded-full bg-slate-900 text-white text-xs font-semibold inline-flex items-center gap-1.5 hover:bg-slate-800 transition-colors cursor-pointer active:scale-95 shrink-0"
               >
-                {voice.voiceReplies ? <Volume2 className="w-4.5 h-4.5" /> : <VolumeX className="w-4.5 h-4.5" />}
+                <Headphones className="w-4 h-4" /> Talk
               </button>
             )}
             <button
               type="button"
-              onClick={() => setShowGuide((s) => !s)}
-              title="Questions guide"
-              className={`p-2 rounded-xl transition-colors cursor-pointer ${showGuide ? 'bg-indigo-50 text-indigo-700' : 'text-slate-500 hover:bg-slate-100'}`}
-            >
-              <BookOpen className="w-4.5 h-4.5" />
-            </button>
-            <button
-              type="button"
-              onClick={resetChat}
-              title="New conversation"
-              className="p-2 rounded-xl text-slate-500 hover:bg-slate-100 transition-colors cursor-pointer"
-            >
-              <RotateCcw className="w-4 h-4" />
-            </button>
-            <button
-              type="button"
               onClick={onClose}
-              className="p-2 rounded-xl text-slate-500 hover:bg-slate-100 transition-colors cursor-pointer"
+              className="w-9 h-9 rounded-xl text-slate-500 hover:bg-slate-100 transition-colors cursor-pointer flex items-center justify-center shrink-0"
               aria-label="Close"
             >
               <X className="w-4.5 h-4.5" />
@@ -408,7 +567,11 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
                           : 'bg-white text-slate-700 border border-slate-200 rounded-2xl rounded-bl-md'
                       }`}
                     >
-                      {m.role === 'zora' ? (
+                      {m.role === 'zora' && m.live ? (
+                        <span className="ib-cursor">
+                          <RichText text={m.text} />
+                        </span>
+                      ) : m.role === 'zora' ? (
                         <StreamingText
                           text={m.text}
                           active={!!m.streaming}
@@ -420,8 +583,23 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
                       )}
                     </div>
 
+                    {m.role === 'zora' && !m.live && m.outcome && (
+                      <div className="ib-fade-up">
+                        <OutcomeCard
+                          outcome={m.outcome}
+                          compact
+                          onPay={() => send('Pay my credit card bill')}
+                          onQrPaid={(sess, c) => handlePaymentDone({ amount: sess.amount, utr: sess.utr || 'UTR-INB-00000000', method: sess.paymentMethod || 'UPI QR', card: c })}
+                          onOpenSimulator={(txn) => {
+                            if (m.outcome?.type === 'qr') activeQrFlow.current = { flowId: m.id, session: m.outcome.session };
+                            setSimulatorTxn(txn);
+                          }}
+                        />
+                      </div>
+                    )}
+
                     {/* Attachments appear once the answer has finished */}
-                    {m.role === 'zora' && !m.streaming && m.attachment && (
+                    {m.role === 'zora' && !m.streaming && !m.live && m.attachment && (
                       <div className="ib-fade-up">
                         {m.attachment.kind === 'suggestions' && (
                           <div className="flex flex-wrap gap-1.5">
@@ -581,7 +759,13 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
               {voice.recognitionSupported && (
                 <button
                   type="button"
-                  onClick={voice.listening ? voice.stopListening : voice.startListening}
+                  onClick={() => {
+                    if (voice.listening) voice.stopListening();
+                    else {
+                      voice.unlockAudio();
+                      voice.startListening();
+                    }
+                  }}
                   disabled={busy}
                   aria-pressed={voice.listening}
                   aria-label={voice.listening ? 'Stop listening' : 'Speak to Zora'}
@@ -602,11 +786,16 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
                 <Send className="w-4 h-4" />
               </button>
             </div>
-            <div className="flex items-center justify-between mt-2 px-1 text-[10px] text-slate-400">
-              <span>
-                {voice.recognitionSupported ? 'Tap the mic to talk. ' : ''}Zora may make mistakes — verify important details.
-              </span>
-              <span className="inline-flex items-center gap-1">
+            <div className="flex items-center justify-between mt-2 text-[10px] text-slate-400">
+              <div className="flex items-center gap-0.5 -ml-1">
+                <button type="button" onClick={() => setShowGuide((v) => !v)} title="Questions guide" aria-pressed={showGuide} className={`h-7 px-2 rounded-lg inline-flex items-center gap-1 text-[11px] font-semibold cursor-pointer transition-colors ${showGuide ? 'bg-indigo-50 text-indigo-700' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
+                  <BookOpen className="w-3.5 h-3.5" /> Guide
+                </button>
+                <button type="button" onClick={resetChat} title="New conversation" className="h-7 px-2 rounded-lg inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-100 hover:text-slate-800 cursor-pointer transition-colors">
+                  <RotateCcw className="w-3.5 h-3.5" /> New
+                </button>
+              </div>
+              <span className="inline-flex items-center gap-1 pr-1">
                 <PhoneCall className="w-3 h-3" /> 1800 202 6161
               </span>
             </div>
@@ -614,6 +803,32 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
         </motion.div>
       )}
       </AnimatePresence>
+
+      <VoiceSession
+        open={voiceSession}
+        state={orbState}
+        caption={voiceSession && lastZoraMsg && lastUserIdx >= 0 && messages.findIndex((m) => m.text === lastZoraMsg) > lastUserIdx ? plainText(lastZoraMsg).slice(0, 220) : undefined}
+        outcomes={voiceOutcomes}
+        micAvailable={voice.recognitionSupported}
+        audioBlocked={voice.audioBlocked}
+        onTapOrb={() => {
+          if (voice.paused) voice.setPaused(false);
+          else if (voice.listening) voice.stopListening();
+          else {
+            voice.unlockAudio();
+            voice.startListening();
+          }
+        }}
+        onTogglePause={() => voice.setPaused(!voice.paused)}
+        onEnableAudio={() => {
+          voice.unlockAudio();
+          voice.speak('Sound is on. How can I help?');
+        }}
+        onEnd={endVoiceSession}
+        onPay={() => send('Pay my credit card bill')}
+        onQrPaid={(sess, c) => handlePaymentDone({ amount: sess.amount, utr: sess.utr || 'UTR-INB-00000000', method: sess.paymentMethod || 'UPI QR', card: c })}
+        onOpenSimulator={(txn) => setSimulatorTxn(txn)}
+      />
 
       {/* Phone simulator for QR scans started inside the chat */}
       <MobilePhoneSimulatorModal

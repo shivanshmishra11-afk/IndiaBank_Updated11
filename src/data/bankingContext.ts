@@ -60,6 +60,9 @@ export interface DashboardSnapshot {
   accounts?: BankAccount[];
   transactions?: Transaction[];
   activeTab?: string;
+  beneficiaries?: { name: string; bank: string; status: string }[];
+  requests?: { id: string; type: string; status: string; eta: string }[];
+  unreadNotifications?: number;
   capturedAt?: number;
 }
 
@@ -77,6 +80,7 @@ export interface LiveCardState {
   lastPaymentDate?: string;
   lastPaymentAmount?: number;
   lastUtr?: string;
+  lastPaymentMethod?: string;
 }
 
 export const inr = (n: number) =>
@@ -144,7 +148,7 @@ export function buildBankingContext(
   if (card.billingCycle) lines.push(`- Billing cycle: ${card.billingCycle}`);
   if (card.lastPaymentAmount) {
     lines.push(
-      `- Last payment: ${inr(card.lastPaymentAmount)} on ${new Date(card.lastPaymentDate || Date.now()).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}${card.lastUtr ? ` (UTR ${card.lastUtr})` : ''}`
+      `- Last payment: ${inr(card.lastPaymentAmount)} on ${new Date(card.lastPaymentDate || Date.now()).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}${card.lastUtr ? ` (UTR ${card.lastUtr})` : ''}${card.lastPaymentMethod ? ` via ${card.lastPaymentMethod}` : ''}`
     );
   }
   lines.push(`- Reward points: ${(creditSeed?.rewardPoints ?? 14250).toLocaleString('en-IN')} (≈ ₹${Math.round((creditSeed?.rewardPoints ?? 14250) * 0.25).toLocaleString('en-IN')} value)`);
@@ -182,8 +186,22 @@ export function buildBankingContext(
   lines.push(`CREDIT SCORE: ${cs.score}/${cs.maxScore} (${cs.rating}), updated ${cs.updatedDate}. Payment history ${cs.factors.paymentHistory}%, utilisation ${cs.factors.creditUtilization}%, credit age ${cs.factors.creditAge}, ${cs.factors.totalAccounts} accounts, ${cs.factors.hardInquiries} hard inquiry.`);
   lines.push('');
 
-  lines.push('SAVED PAYEES: ' + QUICK_PAYEES.map((p) => `${p.name} (${p.vpa}, ${p.bank})`).join('; '));
+  if (snapshot?.beneficiaries?.length) {
+    lines.push('SAVED BENEFICIARIES: ' + snapshot.beneficiaries.map((b) => `${b.name} (${b.bank}${b.status !== 'Active' ? `, ${b.status.toLowerCase()} — not yet usable` : ''})`).join('; '));
+  } else {
+    lines.push('SAVED BENEFICIARIES: ' + QUICK_PAYEES.map((p) => `${p.name} (${p.vpa}, ${p.bank})`).join('; '));
+  }
   lines.push('');
+
+  if (snapshot?.requests?.length) {
+    lines.push('OPEN SERVICE REQUESTS:');
+    snapshot.requests.forEach((r) => lines.push(`- ${r.id}: ${r.type} — ${r.status} (expected ${r.eta})`));
+    lines.push('');
+  }
+  if (typeof snapshot?.unreadNotifications === 'number') {
+    lines.push(`UNREAD NOTIFICATIONS: ${snapshot.unreadNotifications}`);
+    lines.push('');
+  }
 
   lines.push('CURRENT OFFERS:');
   BANK_OFFERS.forEach((o) => lines.push(`- ${o.title} [${o.category}] — ${o.discount}, ${o.expiry}, code ${o.code}. ${o.description}`));

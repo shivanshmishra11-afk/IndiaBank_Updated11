@@ -14,8 +14,15 @@ import { PaymentGatewayView } from './components/views/PaymentGatewayView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ShieldCheck, PhoneCall } from 'lucide-react';
 import { safeStorage } from './utils/storage';
+import { BankProvider, useBank } from './store/BankStore';
+import { ToastHost } from './components/ui/Motion';
 
-export default function App() {
+const Toasts: React.FC = () => {
+  const { toasts, dismissToast } = useBank();
+  return <ToastHost toasts={toasts} onDismiss={dismissToast} />;
+};
+
+function AppShell() {
   const [currentView, setCurrentView] = useState<ViewType>('login');
   const [user, setUser] = useState<UserSession | null>(null);
   const [recentTickets, setRecentTickets] = useState<ComplaintTicket[]>([]);
@@ -199,6 +206,8 @@ export default function App() {
         </ErrorBoundary>
       </main>
 
+      <Toasts />
+
       {/* 24x7 Dynamic Virtual Assistant Widget - Available on Every Page */}
       <NexoraAiAssistant
         isOpen={isAssistantOpen}
@@ -232,5 +241,13 @@ export default function App() {
         </footer>
       )}
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <BankProvider>
+      <AppShell />
+    </BankProvider>
   );
 }

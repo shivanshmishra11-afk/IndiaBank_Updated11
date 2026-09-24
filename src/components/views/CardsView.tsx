@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useBank } from '../../store/BankStore';
 import {
   CreditCard,
   Eye,
@@ -83,29 +84,11 @@ export const CardsView: React.FC<CardsViewProps> = ({ onOpenAssistantForPayment,
   const [qrTimeLeft, setQrTimeLeft] = useState<number>(120);
   const [isQrExpired, setIsQrExpired] = useState<boolean>(false);
 
-  // Sync with Core Banking Credit Card API
+  // Live ledger comes from the shared bank store (same feed as the dashboard, Zora and statements)
+  const { card: storeCard, refreshCard } = useBank();
   useEffect(() => {
-    let isMounted = true;
-    async function fetchCard() {
-      try {
-        const res = await fetch('/api/banking/credit-card');
-        if (res.ok) {
-          const data = await res.json();
-          if (isMounted && data.card) {
-            setCoreCard(data.card);
-          }
-        }
-      } catch {
-        // ignore
-      }
-    }
-    fetchCard();
-    const interval = setInterval(fetchCard, 3000);
-    return () => {
-      isMounted = false;
-      clearInterval(interval);
-    };
-  }, []);
+    if (storeCard) setCoreCard(storeCard);
+  }, [storeCard]);
 
   // Update default payAmount whenever card outstanding changes
   useEffect(() => {
@@ -130,6 +113,7 @@ export const CardsView: React.FC<CardsViewProps> = ({ onOpenAssistantForPayment,
               utr: data.session?.utr || 'UTR-INB-98410291',
               method: 'Dynamic QR (UPI Instant)',
             });
+            refreshCard();
             if (sse) sse.close();
           }
         } catch {
@@ -202,6 +186,7 @@ export const CardsView: React.FC<CardsViewProps> = ({ onOpenAssistantForPayment,
           utr: data.utr,
           method: 'India Bank Savings A/C (AC1000231234)',
         });
+        refreshCard();
       }
     } catch (err) {
       console.error(err);
@@ -252,6 +237,7 @@ export const CardsView: React.FC<CardsViewProps> = ({ onOpenAssistantForPayment,
           utr: data.utr,
           method: 'Debit Card Instant (IMPS)',
         });
+        refreshCard();
       }
     } catch (err) {
       console.error(err);

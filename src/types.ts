@@ -10,7 +10,12 @@ export type NavTab =
   | 'investments'
   | 'loans'
   | 'offers'
-  | 'services';
+  | 'services'
+  | 'statements'
+  | 'beneficiaries'
+  | 'deposits'
+  | 'notifications'
+  | 'profile';
 
 export interface UserSession {
   email: string;
@@ -47,7 +52,58 @@ export interface Transaction {
   type: 'debit' | 'credit';
   status: 'Completed' | 'Pending' | 'Flagged';
   reference: string;
-  iconType?: 'amazon' | 'salary' | 'swiggy' | 'electricity' | 'netflix' | 'shopping' | 'transfer' | 'food' | 'bills';
+  iconType?: 'amazon' | 'salary' | 'swiggy' | 'electricity' | 'netflix' | 'shopping' | 'transfer' | 'food' | 'bills' | 'card' | 'deposit';
+  /** Account the money moved through (defaults to the primary savings account). */
+  accountId?: string;
+  /** Payment rail / channel shown on receipts (IMPS, UPI, NEFT, BBPS, Savings debit…). */
+  channel?: string;
+}
+
+export interface BankNotification {
+  id: string;
+  title: string;
+  body: string;
+  kind: 'payment' | 'credit' | 'security' | 'reminder' | 'offer' | 'service';
+  at: number;
+  read: boolean;
+  /** Tab to open when the notification is tapped. */
+  tab?: NavTab;
+}
+
+export interface Beneficiary {
+  id: string;
+  name: string;
+  nickname?: string;
+  avatar: string;
+  bank: string;
+  accountNumber?: string;
+  ifsc?: string;
+  vpa?: string;
+  status: 'Active' | 'Cooling';
+  addedAt: number;
+  /** Cooling period ends (24h after adding in a real bank; seconds here for the demo). */
+  activatesAt?: number;
+  lastPaidAt?: number;
+  transferCount: number;
+}
+
+export type ServiceRequestStatus = 'Received' | 'In progress' | 'Completed';
+
+export interface ServiceRequest {
+  id: string;
+  type: string;
+  details: string;
+  status: ServiceRequestStatus;
+  createdAt: number;
+  eta: string;
+  steps: { label: string; at: number | null }[];
+}
+
+export interface CardPaymentRecord {
+  utr: string;
+  amount: number;
+  method: string;
+  at: number;
 }
 
 export interface QuickPayee {
@@ -173,6 +229,7 @@ export interface CoreCreditCard {
   lastPaymentDate?: string;
   lastPaymentAmount?: number;
   lastUtr?: string;
+  lastPaymentMethod?: string;
 }
 
 export interface PaymentSession {

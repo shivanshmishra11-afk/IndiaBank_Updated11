@@ -138,10 +138,11 @@ interface CardProps {
   padded?: boolean;
   onClick?: () => void;
   interactive?: boolean;
+  id?: string;
 }
 
-export const Card: React.FC<CardProps> = ({ children, className = '', padded = true, onClick, interactive }) => (
-  <div onClick={onClick} className={`ib-card ${interactive || onClick ? 'ib-card-hover cursor-pointer' : ''} ${padded ? 'p-5 sm:p-6' : ''} ${className}`}>
+export const Card: React.FC<CardProps> = ({ children, className = '', padded = true, onClick, interactive, id }) => (
+  <div id={id} onClick={onClick} className={`ib-card ${interactive || onClick ? 'ib-card-hover cursor-pointer' : ''} ${padded ? 'p-5 sm:p-6' : ''} ${className}`}>
     {children}
   </div>
 );

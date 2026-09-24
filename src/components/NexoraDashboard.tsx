@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   Eye,
   EyeOff,
@@ -15,7 +15,7 @@ import {
   Sparkles,
   ArrowRight,
 } from 'lucide-react';
-import { UserSession, BankAccount, Transaction, SpendingCategory, CreditScoreData, NavTab, CoreCreditCard } from '../types';
+import { UserSession, BankAccount, Transaction, SpendingCategory, CreditScoreData, NavTab } from '../types';
 import { BANK_OFFERS } from '../data/mockData';
 import { Card, CardHeader, Badge, ZoraMark, AnimatedNumber, Skeleton, useSpotlight } from './ui/Primitives';
 import { QuickActionsGrid, QuickActionType } from './dashboard/QuickActionsGrid';
@@ -23,6 +23,7 @@ import { SpendingDonutChart } from './dashboard/SpendingDonutChart';
 import { CreditScoreGauge } from './dashboard/CreditScoreGauge';
 import { formatINR, greetingForNow, firstName } from '../utils/format';
 import { zoraEvents } from './NexoraAiAssistant';
+import { useBank } from '../store/BankStore';
 
 interface NexoraDashboardProps {
   user: UserSession;
@@ -44,28 +45,11 @@ const ACCOUNT_ICON: Record<BankAccount['type'], React.ElementType> = {
 
 export const NexoraDashboard: React.FC<NexoraDashboardProps> = ({ user, accounts, transactions, spendingCategories, creditData, onOpenActionModal, onSelectNavTab, onOpenAssistant }) => {
   const [hideBalances, setHideBalances] = useState(false);
-  const [coreCard, setCoreCard] = useState<CoreCreditCard | null>(null);
-  const [cardLoading, setCardLoading] = useState(true);
   const heroRef = useSpotlight<HTMLDivElement>();
 
-  // Live credit-card ledger (same feed the Cards page and Zora use)
-  useEffect(() => {
-    let alive = true;
-    const load = () =>
-      fetch('/api/banking/credit-card')
-        .then((r) => r.json())
-        .then((d) => {
-          if (alive && d?.card) setCoreCard(d.card);
-        })
-        .catch(() => {})
-        .finally(() => alive && setCardLoading(false));
-    load();
-    const t = setInterval(load, 4000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, []);
+  // Live credit-card ledger from the shared store (same feed the Cards page, Statements and Zora use)
+  const { card: coreCard, ready, unreadCount } = useBank();
+  const cardLoading = !ready && !coreCard;
 
   const totalBalance = accounts.reduce((s, a) => s + a.balance, 0);
   const money = (v: number) => (hideBalances ? '₹ ••••••' : formatINR(v));
@@ -94,6 +78,11 @@ export const NexoraDashboard: React.FC<NexoraDashboardProps> = ({ user, accounts
           <h1 className="ib-h1 text-slate-900 mt-1.5">
             {greetingForNow()}, {firstName(user.name)}
           </h1>
+          {unreadCount > 0 && (
+            <button onClick={() => onSelectNavTab('notifications')} className="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 px-2.5 py-1 rounded-lg cursor-pointer hover:bg-indigo-100 transition-colors">
+              <span className="w-1.5 h-1.5 rounded-full bg-indigo-600" /> {unreadCount} new notification{unreadCount === 1 ? '' : 's'}
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => onOpenActionModal('send-money')} className="ib-btn-primary group">
@@ -176,7 +165,7 @@ export const NexoraDashboard: React.FC<NexoraDashboardProps> = ({ user, accounts
               title="Recent activity"
               description="Latest debits and credits across your accounts"
               action={
-                <button onClick={() => onSelectNavTab('accounts')} className="ib-btn-ghost text-xs py-1.5 group">
+                <button onClick={() => onSelectNavTab('statements')} className="ib-btn-ghost text-xs py-1.5 group">
                   View all <ChevronRight className="w-3.5 h-3.5 ib-arrow" />
                 </button>
               }

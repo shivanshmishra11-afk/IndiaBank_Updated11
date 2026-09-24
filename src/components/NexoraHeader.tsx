@@ -15,8 +15,15 @@ import {
   PhoneCall,
   KeyRound,
   FileText,
+  Wallet,
+  ArrowDownLeft,
+  Tag,
+  Wrench,
+  Bell as BellIcon,
 } from 'lucide-react';
-import { UserSession } from '../types';
+import { motion } from 'motion/react';
+import { UserSession, NavTab, BankNotification } from '../types';
+import { useBank, timeAgo } from '../store/BankStore';
 
 interface NexoraHeaderProps {
   user: UserSession | null;
@@ -26,8 +33,18 @@ interface NexoraHeaderProps {
   isMobileMenuOpen?: boolean;
   onNavigateToComplaints?: () => void;
   onNavigateToLogin?: () => void;
+  onNavigate?: (tab: NavTab) => void;
   ticketCount?: number;
 }
+
+const KIND_STYLE: Record<BankNotification['kind'], { icon: React.ElementType; tone: string }> = {
+  payment: { icon: Wallet, tone: 'text-indigo-600 bg-indigo-50' },
+  credit: { icon: ArrowDownLeft, tone: 'text-emerald-600 bg-emerald-50' },
+  security: { icon: ShieldCheck, tone: 'text-sky-600 bg-sky-50' },
+  reminder: { icon: AlertCircle, tone: 'text-amber-600 bg-amber-50' },
+  offer: { icon: Tag, tone: 'text-rose-600 bg-rose-50' },
+  service: { icon: Wrench, tone: 'text-violet-600 bg-violet-50' },
+};
 
 export const BankMark: React.FC<{ size?: number }> = ({ size = 34 }) => (
   <svg viewBox="0 0 36 36" width={size} height={size} fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -74,11 +91,16 @@ export const NexoraHeader: React.FC<NexoraHeaderProps> = ({
   isMobileMenuOpen,
   onNavigateToComplaints,
   onNavigateToLogin,
+  onNavigate,
   ticketCount = 0,
 }) => {
   const [open, setOpen] = useState<'profile' | 'notifications' | 'messages' | null>(null);
-  const [unread, setUnread] = useState(2);
+  const { notifications, unreadCount: unread, markAllRead, markRead } = useBank();
   const wrapRef = useRef<HTMLDivElement>(null);
+  const go = (tab: NavTab) => {
+    setOpen(null);
+    onNavigate?.(tab);
+  };
 
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
@@ -95,11 +117,6 @@ export const NexoraHeader: React.FC<NexoraHeaderProps> = ({
 
   const toggle = (k: typeof open) => setOpen((o) => (o === k ? null : k));
 
-  const notifications = [
-    { id: 'n1', title: 'Salary credited', desc: '₹75,000.00 received via NEFT from ABC Corp', time: '15 May', icon: CheckCircle2, tone: 'text-emerald-600 bg-emerald-50' },
-    { id: 'n2', title: 'FD maturing soon', desc: 'FD •••• 9101 matures on 12 Sep 2026. Reinvest at 6.75%.', time: '12 May', icon: AlertCircle, tone: 'text-amber-600 bg-amber-50' },
-    { id: 'n3', title: 'New sign-in verified', desc: 'NetBanking login from a trusted browser.', time: 'Today', icon: ShieldCheck, tone: 'text-indigo-600 bg-indigo-50' },
-  ];
 
   return (
     <header className="sticky top-0 z-40 h-16 bg-white/80 backdrop-blur-xl border-b border-slate-200/70 px-4 sm:px-6 lg:px-8 flex items-center justify-between">
@@ -142,42 +159,56 @@ export const NexoraHeader: React.FC<NexoraHeaderProps> = ({
 
         {/* Notifications */}
         <div className="relative">
-          <IconButton
-            label="Notifications"
-            active={open === 'notifications'}
-            dot={unread > 0}
-            onClick={() => {
-              toggle('notifications');
-              setUnread(0);
-            }}
-          >
-            <Bell className="w-5 h-5" />
+          <IconButton label="Notifications" active={open === 'notifications'} dot={unread > 0} onClick={() => toggle('notifications')}>
+            <motion.span key={unread} initial={{ rotate: 0 }} animate={unread > 0 ? { rotate: [0, -14, 12, -8, 6, 0] } : { rotate: 0 }} transition={{ duration: 0.6 }} className="inline-flex">
+              <Bell className="w-5 h-5" />
+            </motion.span>
           </IconButton>
           {open === 'notifications' && (
             <div className="ib-popover absolute right-0 mt-2 w-[340px] sm:w-[380px] p-2 z-50">
               <div className="flex items-center justify-between px-3 py-2">
-                <h3 className="text-sm font-bold text-slate-900">Notifications</h3>
-                <button className="text-xs font-semibold text-indigo-600 hover:underline cursor-pointer">Mark all read</button>
+                <h3 className="text-sm font-bold text-slate-900">
+                  Notifications {unread > 0 && <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-md bg-indigo-600 text-white align-middle">{unread} new</span>}
+                </h3>
+                <button onClick={markAllRead} className="text-xs font-semibold text-indigo-600 hover:underline cursor-pointer">
+                  Mark all read
+                </button>
               </div>
               <ul className="max-h-80 overflow-y-auto ib-scroll">
-                {notifications.map((n) => {
-                  const Icon = n.icon;
+                {notifications.slice(0, 8).map((n) => {
+                  const { icon: Icon, tone } = KIND_STYLE[n.kind];
                   return (
-                    <li key={n.id} className="flex items-start gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-50 cursor-pointer transition-colors">
-                      <span className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${n.tone}`}>
-                        <Icon className="w-4 h-4" />
-                      </span>
-                      <div className="flex-1 min-w-0 text-left">
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="text-sm font-semibold text-slate-900 truncate">{n.title}</p>
-                          <span className="text-[11px] text-slate-400 shrink-0">{n.time}</span>
+                    <li key={n.id}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          markRead(n.id);
+                          if (n.tab) go(n.tab);
+                        }}
+                        className={`w-full flex items-start gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-50 cursor-pointer transition-colors text-left ${n.read ? '' : 'bg-indigo-50/40'}`}
+                      >
+                        <span className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${tone}`}>
+                          <Icon className="w-4 h-4" />
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className={`text-sm truncate ${n.read ? 'font-medium text-slate-800' : 'font-semibold text-slate-900'}`}>{n.title}</p>
+                            <span className="text-[11px] text-slate-400 shrink-0">{timeAgo(n.at)}</span>
+                          </div>
+                          <p className="text-xs text-slate-500 mt-0.5 leading-snug line-clamp-2">{n.body}</p>
                         </div>
-                        <p className="text-xs text-slate-500 mt-0.5 leading-snug">{n.desc}</p>
-                      </div>
+                        {!n.read && <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 mt-2 shrink-0" />}
+                      </button>
                     </li>
                   );
                 })}
+                {notifications.length === 0 && <li className="px-3 py-6 text-center text-sm text-slate-500">You're all caught up.</li>}
               </ul>
+              {onNavigate && (
+                <button onClick={() => go('notifications')} className="w-full mt-1 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-50 rounded-lg cursor-pointer inline-flex items-center justify-center gap-1">
+                  <BellIcon className="w-3.5 h-3.5" /> View all notifications
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -194,16 +225,16 @@ export const NexoraHeader: React.FC<NexoraHeaderProps> = ({
                   <h3 className="text-sm font-bold text-slate-900">Messages</h3>
                   <span className="text-[10px] px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 font-semibold border border-indigo-100">1 new</span>
                 </div>
-                <div className="flex items-start gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-50 cursor-pointer">
+                <button type="button" onClick={() => go('statements')} className="w-full flex items-start gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-50 cursor-pointer text-left">
                   <span className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
                     <FileText className="w-4 h-4" />
                   </span>
                   <div>
-                    <p className="text-sm font-semibold text-slate-900">E-statement · Q1 FY26-27</p>
+                    <p className="text-sm font-semibold text-slate-900">E-statement · Q2 FY26-27</p>
                     <p className="text-xs text-slate-500 mt-0.5 leading-snug">Your digitally signed statement is ready to download.</p>
                     <span className="text-xs text-indigo-600 font-semibold mt-1.5 inline-block hover:underline">Download PDF →</span>
                   </div>
-                </div>
+                </button>
               </div>
             )}
           </div>
@@ -251,13 +282,14 @@ export const NexoraHeader: React.FC<NexoraHeaderProps> = ({
                 </div>
                 <div className="h-px bg-slate-100 my-1" />
                 {[
-                  { icon: User, label: 'Profile & KYC' },
-                  { icon: Settings, label: 'Security & 2FA' },
-                  { icon: ShieldCheck, label: 'Limits & biometric lock' },
+                  { icon: User, label: 'Profile & KYC', tab: 'profile' as NavTab },
+                  { icon: Settings, label: 'Security & limits', tab: 'profile' as NavTab },
+                  { icon: FileText, label: 'Statements & documents', tab: 'statements' as NavTab },
+                  { icon: ShieldCheck, label: 'Service requests', tab: 'services' as NavTab },
                 ].map((i) => {
                   const Icon = i.icon;
                   return (
-                    <button key={i.label} role="menuitem" onClick={() => setOpen(null)} className="w-full px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 rounded-lg flex items-center gap-2.5 cursor-pointer">
+                    <button key={i.label} role="menuitem" onClick={() => (onNavigate ? go(i.tab) : setOpen(null))} className="w-full px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 rounded-lg flex items-center gap-2.5 cursor-pointer">
                       <Icon className="w-4 h-4 text-slate-400" /> {i.label}
                     </button>
                   );

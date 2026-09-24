@@ -21,6 +21,9 @@ export function getDashboardSnapshot(): DashboardSnapshot {
     })),
     transactions: snapshot.transactions?.slice(0, 15),
     activeTab: snapshot.activeTab,
+    beneficiaries: snapshot.beneficiaries,
+    requests: snapshot.requests,
+    unreadNotifications: snapshot.unreadNotifications,
     capturedAt: snapshot.capturedAt,
   };
 }

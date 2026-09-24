@@ -55,104 +55,58 @@ export const INITIAL_ACCOUNTS: BankAccount[] = [
     currency: 'INR',
     status: 'Active',
     color: 'amber',
-    maturityDate: '12 Sep 2026',
+    maturityDate: dateMonthsAhead(6),
     interestRate: '6.75% p.a.',
   },
 ];
 
-export const INITIAL_TRANSACTIONS: Transaction[] = [
-  {
-    id: 'TXN-90214',
-    date: '16 May 2026',
-    rawDate: '2026-05-16',
-    description: 'Amazon India Pvt Ltd - Prime Purchase',
-    merchant: 'Amazon India Pvt Ltd',
-    category: 'Shopping',
-    amount: 2450.00,
-    type: 'debit',
-    status: 'Completed',
-    reference: 'AMZN-928104812',
-    iconType: 'amazon',
-  },
-  {
-    id: 'TXN-90213',
-    date: '15 May 2026',
-    rawDate: '2026-05-15',
-    description: 'Salary Credit from ABC Corp - Monthly Salary',
-    merchant: 'Salary Credit from ABC Corp',
-    category: 'Salary',
-    amount: 75000.00,
-    type: 'credit',
-    status: 'Completed',
-    reference: 'NEFT-SAL7849102',
-    iconType: 'salary',
-  },
-  {
-    id: 'TXN-90212',
-    date: '15 May 2026',
-    rawDate: '2026-05-15',
-    description: 'Swiggy Online Food Delivery Order',
-    merchant: 'Swiggy',
-    category: 'Food & Dining',
-    amount: 650.00,
-    type: 'debit',
-    status: 'Completed',
-    reference: 'UPI-SWIGGY882190',
-    iconType: 'swiggy',
-  },
-  {
-    id: 'TXN-90211',
-    date: '14 May 2026',
-    rawDate: '2026-05-14',
-    description: 'Electricity Bill Payment - Tata Power Mumbai',
-    merchant: 'Electricity Bill Payment',
-    category: 'Bills & Utilities',
-    amount: 1250.00,
-    type: 'debit',
-    status: 'Completed',
-    reference: 'BBPS-ELEC491823',
-    iconType: 'electricity',
-  },
-  {
-    id: 'TXN-90210',
-    date: '12 May 2026',
-    rawDate: '2026-05-12',
-    description: 'Netflix India - Monthly Subscription Ultra HD',
-    merchant: 'Netflix India',
-    category: 'Entertainment',
-    amount: 649.00,
-    type: 'debit',
-    status: 'Completed',
-    reference: 'CARD-NETFLIX-9018',
-    iconType: 'netflix',
-  },
-  {
-    id: 'TXN-90209',
-    date: '10 May 2026',
-    rawDate: '2026-05-10',
-    description: 'Uber India Trip - Bandra to Airport T2',
-    merchant: 'Uber India Systems',
-    category: 'Transport',
-    amount: 540.00,
-    type: 'debit',
-    status: 'Completed',
-    reference: 'UPI-UBER99182',
-    iconType: 'transfer',
-  },
-  {
-    id: 'TXN-90208',
-    date: '08 May 2026',
-    rawDate: '2026-05-08',
-    description: 'Quarterly FD Interest Credit (FD XXXX 9101)',
-    merchant: 'Nexora Bank Treasury',
-    category: 'Investments',
-    amount: 8437.50,
-    type: 'credit',
-    status: 'Completed',
-    reference: 'INT-NXRA-88910',
-    iconType: 'salary',
-  },
+/** "16 Sep 2026" style date `daysAgo` days before today, so the seeded history always looks current. */
+export function dateDaysAgo(daysAgo: number): { date: string; rawDate: string } {
+  const d = new Date();
+  d.setHours(12, 0, 0, 0);
+  d.setDate(d.getDate() - daysAgo);
+  return {
+    date: d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
+    rawDate: d.toISOString().slice(0, 10),
+  };
+}
+
+/** Date `monthsAhead` months from today, e.g. an FD maturity. */
+export function dateMonthsAhead(monthsAhead: number, day = 12): string {
+  const d = new Date();
+  d.setMonth(d.getMonth() + monthsAhead, day);
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+type SeedTxn = Omit<Transaction, 'date' | 'rawDate'> & { daysAgo: number };
+
+const SEED_TRANSACTIONS: SeedTxn[] = [
+  { id: 'TXN-90214', daysAgo: 1, description: 'Amazon India Pvt Ltd - Prime Purchase', merchant: 'Amazon India Pvt Ltd', category: 'Shopping', amount: 2450, type: 'debit', status: 'Completed', reference: 'AMZN-928104812', iconType: 'amazon' },
+  { id: 'TXN-90213', daysAgo: 2, description: 'Salary Credit from ABC Corp - Monthly Salary', merchant: 'Salary Credit from ABC Corp', category: 'Salary', amount: 75000, type: 'credit', status: 'Completed', reference: 'NEFT-SAL7849102', iconType: 'salary' },
+  { id: 'TXN-90212', daysAgo: 2, description: 'Swiggy Online Food Delivery Order', merchant: 'Swiggy', category: 'Food & Dining', amount: 650, type: 'debit', status: 'Completed', reference: 'UPI-SWIGGY882190', iconType: 'swiggy' },
+  { id: 'TXN-90211', daysAgo: 3, description: 'Electricity Bill Payment - Tata Power Mumbai', merchant: 'Electricity Bill Payment', category: 'Bills & Utilities', amount: 1250, type: 'debit', status: 'Completed', reference: 'BBPS-ELEC491823', iconType: 'electricity' },
+  { id: 'TXN-90210', daysAgo: 5, description: 'Netflix India - Monthly Subscription Ultra HD', merchant: 'Netflix India', category: 'Entertainment', amount: 649, type: 'debit', status: 'Completed', reference: 'CARD-NETFLIX-9018', iconType: 'netflix' },
+  { id: 'TXN-90209', daysAgo: 7, description: 'Uber India Trip - Bandra to Airport T2', merchant: 'Uber India Systems', category: 'Transport', amount: 540, type: 'debit', status: 'Completed', reference: 'UPI-UBER99182', iconType: 'transfer' },
+  { id: 'TXN-90208', daysAgo: 9, description: 'Quarterly FD Interest Credit (FD XXXX 9101)', merchant: 'Nexora Bank Treasury', category: 'Investments', amount: 8437.5, type: 'credit', status: 'Completed', reference: 'INT-NXRA-88910', iconType: 'salary' },
+  { id: 'TXN-90207', daysAgo: 11, description: 'Zomato - Dinner order', merchant: 'Zomato', category: 'Food & Dining', amount: 1180, type: 'debit', status: 'Completed', reference: 'UPI-ZOMATO118204', iconType: 'food' },
+  { id: 'TXN-90206', daysAgo: 12, description: 'Rent - ABC Landlord (UPI)', merchant: 'ABC Landlord', category: 'Transfers', amount: 32000, type: 'debit', status: 'Completed', reference: 'UPI/INB/442190', iconType: 'transfer' },
+  { id: 'TXN-90205', daysAgo: 14, description: 'Myntra - Apparel', merchant: 'Myntra Designs', category: 'Shopping', amount: 3199, type: 'debit', status: 'Completed', reference: 'CARD-MYNTRA-77102', iconType: 'shopping' },
+  { id: 'TXN-90204', daysAgo: 16, description: 'Airtel Xstream broadband', merchant: 'Airtel', category: 'Bills & Utilities', amount: 1199, type: 'debit', status: 'Completed', reference: 'BBPS-AIRTEL20981', iconType: 'bills' },
+  { id: 'TXN-90203', daysAgo: 19, description: 'Personal loan EMI - PL882910', merchant: 'India Bank Loans', category: 'Loan EMI', amount: 18450, type: 'debit', status: 'Completed', reference: 'ECS-PL882910-09', iconType: 'bills' },
+  { id: 'TXN-90202', daysAgo: 22, description: 'Blinkit - Groceries', merchant: 'Blinkit', category: 'Groceries', amount: 2140, type: 'debit', status: 'Completed', reference: 'UPI-BLINKIT4410', iconType: 'shopping' },
+  { id: 'TXN-90201', daysAgo: 25, description: 'Priya Sharma - Dinner split', merchant: 'Priya Sharma', category: 'Transfers', amount: 1200, type: 'credit', status: 'Completed', reference: 'UPI/HDFC/119920', iconType: 'transfer' },
+  { id: 'TXN-90200', daysAgo: 28, description: 'Indian Oil - Fuel', merchant: 'Indian Oil Corporation', category: 'Transport', amount: 2660, type: 'debit', status: 'Completed', reference: 'CARD-IOCL-56710', iconType: 'transfer' },
+  { id: 'TXN-90199', daysAgo: 32, description: 'Salary Credit from ABC Corp - Monthly Salary', merchant: 'Salary Credit from ABC Corp', category: 'Salary', amount: 75000, type: 'credit', status: 'Completed', reference: 'NEFT-SAL7712048', iconType: 'salary' },
+  { id: 'TXN-90198', daysAgo: 34, description: 'Apollo Pharmacy', merchant: 'Apollo Pharmacy', category: 'Health', amount: 860, type: 'debit', status: 'Completed', reference: 'UPI-APOLLO88120', iconType: 'shopping' },
+  { id: 'TXN-90197', daysAgo: 41, description: 'Rent - ABC Landlord (UPI)', merchant: 'ABC Landlord', category: 'Transfers', amount: 32000, type: 'debit', status: 'Completed', reference: 'UPI/INB/401877', iconType: 'transfer' },
 ];
+
+/** Seeded statement history with dates relative to today (newest first). */
+export function seedTransactions(): Transaction[] {
+  return SEED_TRANSACTIONS.map(({ daysAgo, ...t }) => ({ ...t, ...dateDaysAgo(daysAgo) }));
+}
+
+export const INITIAL_TRANSACTIONS: Transaction[] = seedTransactions();
 
 export const SPENDING_INSIGHTS: SpendingCategory[] = [
   {

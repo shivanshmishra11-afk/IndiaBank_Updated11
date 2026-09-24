@@ -117,6 +117,8 @@ export const ChatPaymentFlow: React.FC<ChatPaymentFlowProps> = ({
     setCard(r.card);
     setStep('done');
     onCompleted(r);
+    // Let the shared ledger post the payment to Savings, Statements and Notifications right away
+    window.dispatchEvent(new CustomEvent('ib:card-updated'));
   };
 
   const requestOtp = () => {

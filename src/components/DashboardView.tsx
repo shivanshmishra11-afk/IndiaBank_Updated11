@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Home, Building2, CreditCard, Send, Grid } from 'lucide-react';
-import { UserSession, ComplaintTicket, BankAccount, Transaction, NavTab } from '../types';
-import { INITIAL_ACCOUNTS, INITIAL_TRANSACTIONS, SPENDING_INSIGHTS, CREDIT_SCORE } from '../data/mockData';
+import { UserSession, ComplaintTicket, NavTab } from '../types';
+import { SPENDING_INSIGHTS, CREDIT_SCORE } from '../data/mockData';
 import { publishDashboardSnapshot } from '../data/dashboardSnapshot';
+import { useBank } from '../store/BankStore';
 import { NexoraHeader } from './NexoraHeader';
 import { NexoraSidebar } from './NexoraSidebar';
 import { NexoraDashboard } from './NexoraDashboard';
@@ -14,6 +15,11 @@ import { InvestmentsView } from './views/InvestmentsView';
 import { LoansView } from './views/LoansView';
 import { OffersView } from './views/OffersView';
 import { ServicesView } from './views/ServicesView';
+import { StatementsView } from './views/StatementsView';
+import { BeneficiariesView } from './views/BeneficiariesView';
+import { DepositsView } from './views/DepositsView';
+import { NotificationsView } from './views/NotificationsView';
+import { ProfileView } from './views/ProfileView';
 import { ComplaintView } from './ComplaintView';
 import { QuickActionModals } from './modals/QuickActionModals';
 
@@ -27,7 +33,10 @@ interface DashboardViewProps {
   onOpenAssistant?: () => void;
 }
 
-const VALID_TABS: NavTab[] = ['home', 'accounts', 'complaints', 'cards', 'payments', 'transfers', 'investments', 'loans', 'offers', 'services'];
+const VALID_TABS: NavTab[] = [
+  'home', 'accounts', 'complaints', 'cards', 'payments', 'transfers', 'investments', 'loans', 'offers', 'services',
+  'statements', 'beneficiaries', 'deposits', 'notifications', 'profile',
+];
 
 const MOBILE_NAV: { id: NavTab; label: string; icon: React.ElementType }[] = [
   { id: 'home', label: 'Home', icon: Home },
@@ -37,13 +46,15 @@ const MOBILE_NAV: { id: NavTab; label: string; icon: React.ElementType }[] = [
   { id: 'services', label: 'More', icon: Grid },
 ];
 
+const MORE_TABS: NavTab[] = ['offers', 'loans', 'investments', 'complaints', 'deposits', 'beneficiaries', 'statements', 'notifications', 'profile'];
+
 export const DashboardView: React.FC<DashboardViewProps> = ({ user, onNavigateToComplaint, recentTickets, onLogout, onTicketCreated, onNavigateToLogin, onOpenAssistant }) => {
   const [activeTab, setActiveTab] = useState<NavTab>('home');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [activeModal, setActiveModal] = useState<string | null>(null);
-
-  const [accounts, setAccounts] = useState<BankAccount[]>(INITIAL_ACCOUNTS);
-  const [transactions, setTransactions] = useState<Transaction[]>(INITIAL_TRANSACTIONS);
+  const [preselectPayee, setPreselectPayee] = useState<string | undefined>(undefined);
+  const bank = useBank();
+  const { accounts, transactions, transfer, openDeposit } = bank;
 
   // Zora (and other widgets) can ask the shell to switch tabs
   useEffect(() => {
@@ -57,30 +68,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ user, onNavigateTo
 
   useEffect(() => {
     document.getElementById('ib-main')?.scrollTo({ top: 0 });
+    publishDashboardSnapshot({ activeTab });
   }, [activeTab]);
 
-  // Keep Zora in sync with what is on screen (balances after transfers, new transactions, current tab)
-  useEffect(() => {
-    publishDashboardSnapshot({ accounts, transactions, activeTab });
-  }, [accounts, transactions, activeTab]);
-
+  // Quick-action modals and legacy callers still speak this simple shape
   const handleTransferCompleted = (amount: number, description: string, payee: string) => {
-    setAccounts((prev) => prev.map((acc) => (acc.type === 'Savings' ? { ...acc, balance: Math.max(0, acc.balance - amount) } : acc)));
-    setTransactions((prev) => [
-      {
-        id: `txn-${Date.now()}`,
-        merchant: payee,
-        category: 'Transfers',
-        amount,
-        type: 'debit',
-        date: 'Today, just now',
-        status: 'Completed',
-        reference: `UPI/INB/${Date.now().toString().slice(-6)}`,
-        iconType: 'transfer',
-        description,
-      },
-      ...prev,
-    ]);
+    transfer({ amount, description, payeeName: payee, channel: 'IMPS' });
   };
 
   const view = (() => {
@@ -100,6 +93,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ user, onNavigateTo
         );
       case 'accounts':
         return <AccountsView accounts={accounts} transactions={transactions} onOpenActionModal={setActiveModal} />;
+      case 'statements':
+        return <StatementsView />;
       case 'complaints':
         return (
           <div className="px-4 sm:px-6 lg:px-10 py-6 lg:py-9 max-w-[1240px] mx-auto w-full">
@@ -110,15 +105,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ user, onNavigateTo
         return <CardsView user={user} onOpenAssistantForPayment={() => onOpenAssistant && onOpenAssistant()} />;
       case 'transfers':
       case 'payments':
-        return <TransfersView accounts={accounts} onTransferCompleted={handleTransferCompleted} onOpenScanPay={() => setActiveModal('scan-pay')} mode={activeTab} />;
+        return <TransfersView onOpenScanPay={() => setActiveModal('scan-pay')} mode={activeTab} preselectBeneficiaryId={preselectPayee} />;
+      case 'beneficiaries':
+        return (
+          <BeneficiariesView
+            onSendMoney={(id) => {
+              setPreselectPayee(id);
+              setActiveTab('transfers');
+            }}
+          />
+        );
+      case 'deposits':
+        return <DepositsView />;
       case 'investments':
-        return <InvestmentsView onOpenFdModal={() => setActiveModal('open-fd')} />;
+        return <InvestmentsView onOpenFdModal={() => setActiveTab('deposits')} />;
       case 'loans':
         return <LoansView user={user} />;
       case 'offers':
         return <OffersView />;
+      case 'notifications':
+        return <NotificationsView onNavigate={setActiveTab} />;
+      case 'profile':
+        return <ProfileView user={user} onLogout={onLogout} />;
       case 'services':
-        return <ServicesView onOpenGrievance={() => setActiveTab('complaints')} />;
+        return <ServicesView onOpenGrievance={() => setActiveTab('complaints')} onNavigate={setActiveTab} />;
     }
   })();
 
@@ -132,6 +142,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ user, onNavigateTo
         isMobileMenuOpen={isMobileMenuOpen}
         onNavigateToComplaints={() => setActiveTab('complaints')}
         onNavigateToLogin={onNavigateToLogin}
+        onNavigate={setActiveTab}
         ticketCount={recentTickets.length}
       />
 
@@ -192,7 +203,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ user, onNavigateTo
         <ul className="grid grid-cols-5">
           {MOBILE_NAV.map((n) => {
             const Icon = n.icon;
-            const active = activeTab === n.id || (n.id === 'services' && ['offers', 'loans', 'investments', 'complaints'].includes(activeTab));
+            const active = activeTab === n.id || (n.id === 'services' && MORE_TABS.includes(activeTab)) || (n.id === 'payments' && activeTab === 'transfers');
             return (
               <li key={n.id}>
                 <button
@@ -211,7 +222,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ user, onNavigateTo
         </ul>
       </nav>
 
-      <QuickActionModals modalType={activeModal} onClose={() => setActiveModal(null)} accounts={accounts} creditData={CREDIT_SCORE} onTransferSuccess={handleTransferCompleted} onOpenGrievance={onNavigateToComplaint} />
+      <QuickActionModals
+        modalType={activeModal}
+        onClose={() => setActiveModal(null)}
+        accounts={accounts}
+        creditData={CREDIT_SCORE}
+        onTransferSuccess={handleTransferCompleted}
+        onDepositBooked={(amount, tenureMonths) => openDeposit({ kind: 'FD', amount, tenureMonths, ratePct: 6.75 })}
+        onOpenGrievance={onNavigateToComplaint}
+      />
     </div>
   );
 };

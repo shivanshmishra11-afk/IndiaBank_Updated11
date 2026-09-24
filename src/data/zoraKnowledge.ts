@@ -251,7 +251,7 @@ export const ZORA_CATEGORIES: ZoraCategory[] = [
         category: 'Cheque & Statements',
         question: 'How can I request a new Cheque Book?',
         shortLabel: 'Request Cheque Book',
-        answer: `You can order a personalized cheque book in a few clicks:\n\n1. Go to **Services / Grievance Portal** or select **'Cheque Services'**.\n2. Choose your account number (e.g. AC1000234567) and booklet size (20 or 50 leaves).\n3. Confirm delivery address. The cheque book is printed with CTS-2010 security features and dispatched via speed courier within 3-4 working days.\n4. Consignment tracking details are SMSed to your registered mobile.`,
+        answer: `I can order a personalised cheque book for you right here — just tell me three things:\n\n1. How many leaves: 25, 50 or 100.\n2. Which account: Savings (•••• 1234) or Current (•••• 5678).\n3. Delivery: your registered address (14B Marine Drive, Mumbai) or pickup at the Nariman Point branch.\n\nIt's free, printed with CTS-2010 security features, and ready in 4 working days. You'll get a reference number to track it under Services, and dispatch details by SMS.`,
         actionType: 'grievance',
         actionLabel: 'Cheque Book Services',
       },

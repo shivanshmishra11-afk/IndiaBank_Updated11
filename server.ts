@@ -37,10 +37,36 @@ if (!process.env.GEMINI_API_KEY) {
 
 // Preferred model first; the rest are fallbacks for capacity (503) / quota (429) errors.
 const GEMINI_MODELS = (process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL] : []).concat([
-  "gemini-3.8-flash",
   "gemini-3.6-flash",
+  "gemini-3.8-flash",
   "gemini-2.5-flash",
+  "gemini-3.5-flash",
+  "gemini-3.7-flash",
+  "gemini-3.1-flash-lite",
+  "gemini-3.5-flash-lite",
 ]);
+
+// Some models reject thinkingConfig (400 "invalid argument"); remember which so we stop sending it.
+const noThinkingConfig = new Set<string>();
+const genConfig = (model: string, systemInstruction: string, temperature: number, maxOutputTokens: number) => ({
+  systemInstruction,
+  temperature,
+  maxOutputTokens,
+  ...(noThinkingConfig.has(model) ? {} : { thinkingConfig: { thinkingBudget: 0 } }),
+});
+const isInvalidArgument = (err: any) => /"code":\s*400|INVALID_ARGUMENT|invalid argument/i.test(String(err?.message || ""));
+
+// A model that just returned 429/503 is skipped for a minute so replies do not wait on a known-dead model.
+const modelCooldownUntil: Record<string, number> = {};
+const MODEL_COOLDOWN_MS = 60_000;
+const availableModels = () => {
+  const now = Date.now();
+  const live = GEMINI_MODELS.filter((m) => (modelCooldownUntil[m] || 0) <= now);
+  return live.length ? live : GEMINI_MODELS;
+};
+const coolDown = (model: string) => {
+  modelCooldownUntil[model] = Date.now() + MODEL_COOLDOWN_MS;
+};
 
 const isTransientGeminiError = (err: any) => {
   const msg = String(err?.message || "");
@@ -51,27 +77,31 @@ const isTransientGeminiError = (err: any) => {
 /** Calls Gemini, walking down the model list when a model is overloaded or out of quota. */
 async function generateWithFallback(args: { contents: any[]; systemInstruction: string; temperature?: number; maxOutputTokens?: number }) {
   let lastErr: any = null;
-  for (const model of GEMINI_MODELS) {
+  for (const model of availableModels()) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
+        // Gemini 2.5/3.x count "thinking" tokens against the output budget; a chat reply grounded
+        // in supplied data does not need it, and it was truncating long answers.
         const response = await ai.models.generateContent({
           model,
           contents: args.contents,
-          config: {
-            systemInstruction: args.systemInstruction,
-            temperature: args.temperature ?? 0.4,
-            maxOutputTokens: args.maxOutputTokens ?? 2048,
-            // Gemini 2.5/3.x count "thinking" tokens against the output budget; a chat reply
-            // grounded in supplied data does not need it, and it was truncating long answers.
-            thinkingConfig: { thinkingBudget: 0 },
-          },
+          config: genConfig(model, args.systemInstruction, args.temperature ?? 0.4, args.maxOutputTokens ?? 2048),
         });
         return { response, model };
       } catch (err: any) {
         lastErr = err;
+        if (isInvalidArgument(err) && !noThinkingConfig.has(model)) {
+          noThinkingConfig.add(model);
+          continue; // retry once without thinkingConfig
+        }
         if (!isTransientGeminiError(err)) throw err;
         console.warn(`[India Bank AI Chat] ${model} unavailable (attempt ${attempt + 1}): ${String(err?.message || err).slice(0, 140)}`);
+        if (/429|RESOURCE_EXHAUSTED|quota/i.test(String(err?.message || ""))) {
+          coolDown(model);
+          break; // quota will not recover in 400 ms — move to the next model now
+        }
         if (attempt === 0) await new Promise((r) => setTimeout(r, 400));
+        else coolDown(model);
       }
     }
   }
@@ -109,6 +139,14 @@ export interface CoreCreditCard {
   lastPaymentDate?: string;
   lastPaymentAmount?: number;
   lastUtr?: string;
+  lastPaymentMethod?: string;
+}
+
+export interface CardPaymentRecord {
+  utr: string;
+  amount: number;
+  method: string;
+  at: number;
 }
 
 export interface PaymentSession {
@@ -142,6 +180,20 @@ let coreCreditCard: CoreCreditCard = {
   dueDate: "05 Oct 2026",
   billingCycle: "01 Aug 2026 - 31 Aug 2026",
 };
+
+/** Every settled card payment, newest first — the client ledger reconciles against this. */
+const cardPayments: CardPaymentRecord[] = [];
+
+function recordCardPayment(amount: number, method: string, utr: string) {
+  coreCreditCard.outstandingBalance = Math.max(0, coreCreditCard.outstandingBalance - amount);
+  coreCreditCard.availableCredit = Math.min(coreCreditCard.creditLimit, coreCreditCard.availableCredit + amount);
+  coreCreditCard.lastPaymentDate = new Date().toISOString();
+  coreCreditCard.lastPaymentAmount = amount;
+  coreCreditCard.lastUtr = utr;
+  coreCreditCard.lastPaymentMethod = method;
+  cardPayments.unshift({ utr, amount, method, at: Date.now() });
+  if (cardPayments.length > 50) cardPayments.length = 50;
+}
 
 const activePaymentSessions: Record<string, PaymentSession> = {};
 const sseClients: Record<string, express.Response[]> = {};
@@ -191,6 +243,7 @@ app.get("/api/banking/credit-card", (_req, res) => {
   return res.json({
     success: true,
     card: coreCreditCard,
+    payments: cardPayments,
   });
 });
 
@@ -209,6 +262,7 @@ app.post("/api/banking/reset-card", (_req, res) => {
     dueDate: "05 Oct 2026",
     billingCycle: "01 Aug 2026 - 31 Aug 2026",
   };
+  cardPayments.length = 0;
   return res.json({
     success: true,
     card: coreCreditCard,
@@ -372,14 +426,7 @@ app.post("/api/payment/complete", (req, res) => {
   session.utr = `UTR-INB-${Math.floor(10000000 + Math.random() * 90000000)}`;
 
   // Update Core Banking Ledger
-  coreCreditCard.outstandingBalance = Math.max(0, coreCreditCard.outstandingBalance - session.amount);
-  coreCreditCard.availableCredit = Math.min(
-    coreCreditCard.creditLimit,
-    coreCreditCard.availableCredit + session.amount
-  );
-  coreCreditCard.lastPaymentDate = new Date().toISOString();
-  coreCreditCard.lastPaymentAmount = session.amount;
-  coreCreditCard.lastUtr = session.utr;
+  recordCardPayment(session.amount, session.paymentMethod, session.utr);
 
   console.log(
     `[Intellect Bank] Payment simulated for ${txnId}: ₹${session.amount} paid! New Outstanding: ₹${coreCreditCard.outstandingBalance}, Available Credit: ₹${coreCreditCard.availableCredit}`
@@ -462,12 +509,8 @@ app.post("/api/payment/direct-pay", (req, res) => {
   const { amount, method, sourceAccount, cvv, otp, cardNumber } = req.body;
   const payAmt = Number(amount) || coreCreditCard.outstandingBalance || 87500;
   
-  coreCreditCard.outstandingBalance = Math.max(0, coreCreditCard.outstandingBalance - payAmt);
-  coreCreditCard.availableCredit = Math.min(coreCreditCard.creditLimit, coreCreditCard.availableCredit + payAmt);
-  coreCreditCard.lastPaymentDate = new Date().toISOString();
-  coreCreditCard.lastPaymentAmount = payAmt;
   const utr = `UTR-INB-${Math.floor(10000000 + Math.random() * 90000000)}`;
-  coreCreditCard.lastUtr = utr;
+  recordCardPayment(payAmt, method || "Savings Account", utr);
 
   console.log(`[India Bank] Direct payment processed: ₹${payAmt} via ${method || "Savings Account"}. New Outstanding: ₹${coreCreditCard.outstandingBalance}, UTR: ${utr}`);
 
@@ -482,18 +525,178 @@ app.post("/api/payment/direct-pay", (req, res) => {
 });
 
 // AI-Powered Real Banking Assistant powered by Gemini 3.8 Flash
-app.post("/api/ai/chat", async (req, res) => {
-  const { message, history = [], user, dashboard } = req.body as {
+// ------------------------------------------------------------------
+// Offline action dialogue: lets the customer open an FD, order a cheque book or pay the
+// card by conversation even when Gemini is unavailable. Same confirm-then-execute
+// protocol as the model: ask for what is missing → read back and ask "Shall I go ahead?"
+// → execute on a clear yes.
+// ------------------------------------------------------------------
+const FD_RATE_CARD: [number, number][] = [[36, 6.6], [18, 6.75], [12, 6.5], [6, 5.75], [3, 4.5]];
+const fdRateFor = (months: number) => FD_RATE_CARD.find(([min]) => months >= min)?.[1] ?? 4.5;
+const fdMaturityValue = (amt: number, months: number, rate: number) => Math.round(amt * Math.pow(1 + rate / 400, 4 * (months / 12)));
+const AFFIRM = /^\s*(yes|yeah|yep|ya|haan|sure|ok(ay)?|confirm(ed)?|go ahead|do it|proceed|please do|absolutely|correct|right|book it|pay it|done)\b/i;
+const NEGATE = /^\s*(no|nope|cancel|stop|don'?t|not now|wait|hold)\b/i;
+
+function parseAmount(q: string): number | null {
+  const t = q.toLowerCase().replace(/,/g, "");
+  const words: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, half: 0.5, a: 1 };
+  let m = t.match(/(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|half|a)\s*(lakhs?|lacs?|l\b|crores?|cr\b|thousand|k\b)/);
+  if (m) {
+    const n = isNaN(Number(m[1])) ? words[m[1]] : Number(m[1]);
+    const unit = m[2];
+    if (/^(lakh|lac|l)/.test(unit)) return Math.round(n * 100000);
+    if (/^(crore|cr)/.test(unit)) return Math.round(n * 10000000);
+    return Math.round(n * 1000);
+  }
+  m = t.match(/(?:₹|rs\.?|rupees?)\s*(\d{3,})/) || t.match(/(\d{4,})/);
+  return m ? Number(m[1]) : null;
+}
+function parseMonths(q: string): number | null {
+  const t = q.toLowerCase();
+  const y = t.match(/(\d+(?:\.\d+)?|one|two|three|four|five)\s*(?:years?|yrs?)/);
+  const words: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5 };
+  if (y) return Math.round((isNaN(Number(y[1])) ? words[y[1]] : Number(y[1])) * 12);
+  const m = t.match(/(\d+)\s*(?:months?|mon\b|m\b)/);
+  return m ? Number(m[1]) : null;
+}
+
+function fallbackActionDialogue(
+  userQuery: string,
+  history: any[],
+  ctx: { fmt: (n: number) => string; cardOutstanding: number; cardMinDue: number; savingsBalance: number; firstName: string }
+): { text: string; action: { type: "OPEN_FD" | "CHEQUE_BOOK" | "PAY_CARD"; params: Record<string, string> } | null } | null {
+  const q = userQuery.toLowerCase();
+  const lastModel = [...history].reverse().find((h) => h.role !== "user")?.text || "";
+  const pending = /shall i go ahead/i.test(lastModel) ? lastModel : "";
+  const { fmt } = ctx;
+  const direct = /go ahead|confirm|proceed|do it|book it|pay it now|right away/.test(q);
+
+  // ---- confirmation of a pending read-back ----
+  if (pending && AFFIRM.test(q)) {
+    if (/fixed deposit/i.test(pending)) {
+      const amt = Number((pending.match(/₹([\d,]+)/)?.[1] || "0").replace(/,/g, ""));
+      const months = Number(pending.match(/for (\d+) months/i)?.[1] || 12);
+      const rate = fdRateFor(months);
+      return {
+        text: `Done — I'm booking your fixed deposit of ${fmt(amt)} for ${months} months at ${rate.toFixed(2)}% per annum, debited from your savings account. It will mature at about ${fmt(fdMaturityValue(amt, months, rate))}. The deposit advice is on its way to your email.`,
+        action: { type: "OPEN_FD", params: { amount: String(amt), months: String(months) } },
+      };
+    }
+    if (/cheque book/i.test(pending)) {
+      const leaves = pending.match(/(25|50|100)[- ]leaf/i)?.[1] || "25";
+      const account = /current account/i.test(pending) ? "current" : "savings";
+      const delivery = /branch/i.test(pending) ? "branch" : "registered";
+      return {
+        text: `Done — your ${leaves}-leaf cheque book for the ${account} account has been requested${delivery === "branch" ? " for pickup at the Nariman Point branch" : " and will be delivered to your registered address"} within 4 working days. I've added a reference you can track under Services.`,
+        action: { type: "CHEQUE_BOOK", params: { leaves, account, delivery } },
+      };
+    }
+    if (/pay|payment/i.test(pending)) {
+      const amt = Number((pending.match(/₹([\d,]+(?:\.\d+)?)/)?.[1] || String(ctx.cardOutstanding)).replace(/,/g, ""));
+      const method = /qr/i.test(pending) ? "qr" : "savings";
+      return {
+        text:
+          method === "qr"
+            ? `Here is a single-use QR for ${fmt(amt)} towards your credit card. Scan it from any phone or UPI app — it stays valid for two minutes and I'll confirm the moment it's paid.`
+            : `Done — I'm debiting ${fmt(amt)} from your savings account towards your credit card bill. You'll see the receipt with the U T R number here in a second.`,
+        action: { type: "PAY_CARD", params: { amount: String(Math.round(amt)), method } },
+      };
+    }
+  }
+  if (pending && NEGATE.test(q)) return { text: `No problem, ${ctx.firstName} — I've cancelled that. Anything else you'd like to do?`, action: null };
+
+  // ---- fixed deposit ----
+  const wantsFd = /(open|book|start|create|make|invest in|want)\b.*\b(fd|fixed deposit|deposit)|\b(fd|fixed deposit)\b.*\b(open|book|start|create|for)\b/.test(q) || (/fixed deposit|\bfd\b/.test(q) && /\d|lakh|thousand/.test(q));
+  const prevFd = /fixed deposit/i.test(lastModel) && /how much|tenure|for how long|amount/i.test(lastModel);
+  if (wantsFd || prevFd) {
+    const amt = parseAmount(q) ?? (prevFd ? Number((lastModel.match(/₹([\d,]+)/)?.[1] || "0").replace(/,/g, "")) || null : null);
+    const months = parseMonths(q) ?? (prevFd ? Number(lastModel.match(/for (\d+) months/i)?.[1]) || null : null);
+    if (!amt && !months) return { text: `Happy to open a fixed deposit for you. How much would you like to deposit, and for how long? Rates go up to 6.75% per annum for 18 to 35 months, and the minimum is ₹10,000.`, action: null };
+    if (!amt) return { text: `Got it — a fixed deposit for ${months} months at ${fdRateFor(months!).toFixed(2)}% per annum. How much would you like to deposit? Your savings balance is ${fmt(ctx.savingsBalance)}.`, action: null };
+    if (!months) return { text: `Got it — a fixed deposit of ${fmt(amt)}. For how long? 18 to 35 months earns the best rate, 6.75% per annum.`, action: null };
+    if (amt < 10000) return { text: `The minimum fixed deposit is ₹10,000. How much would you like to deposit?`, action: null };
+    if (amt > ctx.savingsBalance) return { text: `That's more than the ${fmt(ctx.savingsBalance)} in your savings account. What amount would you like to deposit instead?`, action: null };
+    const rate = fdRateFor(months);
+    if (direct)
+      return {
+        text: `Done — I'm booking your fixed deposit of ${fmt(amt)} for ${months} months at ${rate.toFixed(2)}% per annum, debited from your savings account. It will mature at about ${fmt(fdMaturityValue(amt, months, rate))}.`,
+        action: { type: "OPEN_FD", params: { amount: String(amt), months: String(months) } },
+      };
+    return {
+      text: `Here's the read-back: a fixed deposit of ${fmt(amt)} for ${months} months at ${rate.toFixed(2)}% per annum, debited from your savings account, maturing at about ${fmt(fdMaturityValue(amt, months, rate))}. Shall I go ahead?`,
+      action: null,
+    };
+  }
+
+  // ---- cheque book ----
+  const wantsCheque = /cheque ?book|check ?book|cheque leaves|new cheque/.test(q);
+  const prevCheque = /cheque/i.test(lastModel) && /how many|which account|leaf|leaves|savings or current|registered address|branch/i.test(lastModel);
+  if (wantsCheque || prevCheque) {
+    // remember what was already collected from the last read-back / question
+    const known = prevCheque ? lastModel : "";
+    const leaves = q.match(/\b(25|50|100)\b/)?.[1] || known.match(/(25|50|100)[- ]leaf/i)?.[1];
+    const account = /current/.test(q) ? "current" : /saving/.test(q) ? "savings" : /current account/i.test(known) && !/savings or current/i.test(known) ? "current" : /savings account/i.test(known) && !/savings or current/i.test(known) ? "savings" : undefined;
+    const delivery = /branch|pick ?up|collect/.test(q) ? "branch" : /registered|home|address|deliver|courier|post/.test(q) ? "registered" : /to your registered address/i.test(known) ? "registered" : /at the nariman point branch/i.test(known) ? "branch" : undefined;
+    const missing: string[] = [];
+    if (!leaves) missing.push("how many leaves — 25, 50 or 100");
+    if (!account) missing.push("for your savings or current account");
+    if (!delivery) missing.push("delivered to your registered address at Marine Drive, or picked up at the Nariman Point branch");
+    if (missing.length) {
+      const have = [leaves && `${leaves} leaves`, account && `${account} account`, delivery && (delivery === "branch" ? "branch pickup" : "home delivery")].filter(Boolean).join(", ");
+      return { text: `${have ? `Got it — ${have} for the cheque book. ` : "Sure, I can order a cheque book. "}Just tell me ${missing.join("; ")}?`, action: null };
+    }
+    const where = delivery === "branch" ? "for pickup at the Nariman Point branch" : "to your registered address, 14B Marine Drive, Mumbai";
+    if (direct)
+      return {
+        text: `Done — your ${leaves}-leaf cheque book for the ${account} account has been requested ${where}. It's free and takes 4 working days; you can track it under Services.`,
+        action: { type: "CHEQUE_BOOK", params: { leaves: leaves!, account: account!, delivery: delivery! } },
+      };
+    return { text: `Here's the read-back: a ${leaves}-leaf cheque book for your ${account} account, ${where}, free of charge, in 4 working days. Shall I go ahead?`, action: null };
+  }
+
+  // ---- pay credit card by voice/chat ----
+  const wantsPay = /\bpay\b.*\b(card|credit|bill|due|minimum|outstanding)\b|\bqr\b|scan/.test(q);
+  const prevPay = /credit card/i.test(lastModel) && /how much|which (way|channel|method)|full|minimum|savings or/i.test(lastModel);
+  if (wantsPay || prevPay) {
+    if (ctx.cardOutstanding <= 0) return { text: `Good news — there's nothing due on your credit card right now.`, action: null };
+    const method = /qr|scan|phone|upi/.test(q) ? "qr" : /saving|account|debit|direct/.test(q) ? "savings" : prevPay && /QR/.test(lastModel) && !/savings or/i.test(lastModel) ? "qr" : undefined;
+    let amt: number | null = /full|total|entire|whole|complete/.test(q) ? ctx.cardOutstanding : /minimum|min\b/.test(q) ? ctx.cardMinDue : parseAmount(q);
+    if (!amt && prevPay) amt = Number((lastModel.match(/₹([\d,]+(?:\.\d+)?)(?= towards| from| via)/)?.[1] || "0").replace(/,/g, "")) || null;
+    if (!amt && !method) return { text: `Your credit card has ${fmt(ctx.cardOutstanding)} due, with a minimum of ${fmt(ctx.cardMinDue)}. How much would you like to pay — the full amount, the minimum, or another amount — and should I take it from your savings account or show a QR to scan?`, action: null };
+    if (!amt) return { text: `Sure — ${method === "qr" ? "a QR to scan" : "from your savings account"}. How much: the full ${fmt(ctx.cardOutstanding)}, the minimum ${fmt(ctx.cardMinDue)}, or another amount?`, action: null };
+    if (amt > ctx.cardOutstanding) amt = ctx.cardOutstanding;
+    if (!method) return { text: `Got it — ${fmt(amt)} towards your card. Should I debit your savings account directly, or show a QR you can scan from any phone?`, action: null };
+    if (method === "savings" && amt > ctx.savingsBalance) return { text: `Your savings balance is ${fmt(ctx.savingsBalance)}, which isn't enough for ${fmt(amt)}. Would you like a smaller amount, or a QR to pay from another account?`, action: null };
+    if (direct)
+      return {
+        text:
+          method === "qr"
+            ? `Here is a single-use QR for ${fmt(amt)} towards your credit card. Scan it from any phone or UPI app — it stays valid for two minutes and I'll confirm the moment it's paid.`
+            : `Done — I'm debiting ${fmt(amt)} from your savings account towards your credit card bill. You'll see the receipt with the U T R number here in a second.`,
+        action: { type: "PAY_CARD", params: { amount: String(Math.round(amt)), method } },
+      };
+    return {
+      text:
+        method === "qr"
+          ? `Here's the read-back: a payment of ${fmt(amt)} towards your credit card via QR, which you can scan from any phone or UPI app. Shall I go ahead?`
+          : `Here's the read-back: a payment of ${fmt(amt)} towards your credit card from your savings account, leaving ${fmt(ctx.savingsBalance - amt)} there. Shall I go ahead?`,
+      action: null,
+    };
+  }
+  return null;
+}
+
+function prepareChat(body: any) {
+  const { message, history = [], user, dashboard, voice } = body as {
     message?: string;
     history?: any[];
     user?: { name?: string; email?: string };
     dashboard?: DashboardSnapshot;
+    voice?: boolean;
   };
   const userQuery = (message || "").trim();
 
-  if (!userQuery) {
-    return res.status(400).json({ error: "Message is required" });
-  }
+  if (!userQuery) return null;
 
   const userName = user?.name || "Customer";
   const userEmail = user?.email || "shivansh.mishra@intellectdesign.com";
@@ -550,7 +753,7 @@ app.post("/api/ai/chat", async (req, res) => {
     cardOutstanding > 0
       ? `statement of ${fmt(cardOutstanding)} generated — minimum ${fmt(cardMinDue)}, due ${dueLine}`
       : `fully paid, nothing due${coreCreditCard.lastUtr ? ` (last payment UTR ${coreCreditCard.lastUtr})` : ""}`
-  }\n• Salary: ₹75,000.00 credited on 15 May 2026 from ABC Corp\n• Fixed deposit FD8829109101 (₹5,00,000) matures on 12 Sep 2026 — high-yield reinvestment at 6.75% is available\n• Personal loan PL882910: EMI of ₹18,450 auto-debits on the 1st; 22 EMIs remaining\n• Rewards: 14,250 points (worth about ₹3,562) ready to redeem\n• Offer: special FD rate of 6.75% p.a. valid till 30 Sep 2026\n\nTell me which one you'd like to act on.`;
+  }\n• Salary: ₹75,000.00 credited from ABC Corp this month\n• Fixed deposit FD8829109101 (₹5,00,000) matures in about 6 months — high-yield reinvestment at 6.75% is available\n• Personal loan PL882910: EMI of ₹18,450 auto-debits on the 1st; 22 EMIs remaining\n• Rewards: 14,250 points (worth about ₹3,562) ready to redeem\n• Offer: special FD rate of 6.75% p.a. valid till 30 Sep 2026\n\nTell me which one you'd like to act on.`;
 
   const bankingContext = buildBankingContext(dashboard, coreCreditCard, { userName, userEmail });
 
@@ -577,12 +780,23 @@ INTENT TAGS — append exactly one of these at the very end of the reply when it
 - [INTENT:UPDATES] when they ask "any updates / what's new / reminders". Summarise: card statement and due date, upcoming loan EMI, the FD maturity, the latest salary credit, reward points, and one or two current offers.
 - No tag for anything else.
 
-Payment channels you can offer for the card: Savings account direct debit, any debit card verified with an OTP, or a single-use dynamic QR the customer can scan from any phone or UPI app. Never ask for card numbers, CVV, PINs, OTPs or passwords in chat.`;
+Payment channels you can offer for the card: Savings account direct debit, any debit card verified with an OTP, or a single-use dynamic QR the customer can scan from any phone or UPI app. Never ask for card numbers, CVV, PINs, OTPs or passwords in chat.
 
-  try {
-    if (!process.env.GEMINI_API_KEY) {
-      throw new Error("GEMINI_API_KEY not configured");
-    }
+ACTIONS YOU CAN PERFORM (the app executes these the moment you emit the tag):
+- Open a fixed deposit → [ACTION:OPEN_FD amount=<rupees> months=<tenure>]
+  Rates (p.a., quarterly compounding): 3–5 months 4.50%, 6–11 months 5.75%, 12–17 months 6.50%, 18–35 months 6.75%, 36–60 months 6.60%. Minimum ₹10,000, funded from the Savings account (check the balance in CUSTOMER DATA). Maturity ≈ amount × (1 + rate/400)^(4 × months/12).
+- Request a cheque book → [ACTION:CHEQUE_BOOK leaves=<25|50|100> account=<savings|current> delivery=<registered|branch>]
+  Required before you can raise it: number of leaves (25, 50 or 100), which account (savings or current), and delivery (registered address — 14B Marine Drive, Mumbai — or pickup at the Nariman Point branch). Free, 4 working days.
+- Raise any other service request → [ACTION:REQUEST type=<address_update|mobile_update|nominee_update|stop_cheque|balance_letter|locker|tds_certificate|statement> note=<details_with_underscores_for_spaces>]
+  Required details: address update → the new address; mobile update → the new number; nominee → name and relationship; stop cheque → cheque number and reason; balance letter → purpose; locker → size and branch; statement → period. Every request gets a reference number the customer can track under Services.
+- Pay the credit card bill instantly from Savings → [ACTION:PAY_CARD amount=<rupees> method=savings]
+- Generate a payment QR for the card bill (scan from any phone / UPI app) → [ACTION:PAY_CARD amount=<rupees> method=qr]
+Rules for actions:
+1. Collect what is missing in ONE message, asking at most three questions together (e.g. "How many leaves — 25, 50 or 100 — for which account, and should it go to your registered address or the branch?"). Never ask more than three things in a turn, and never ask for something already given. For an FD ask amount and tenure; for a card payment ask amount and channel — offer full ${cardOutstanding > 0 ? fmt(cardOutstanding) : "amount"}, minimum ${fmt(cardMinDue)} or a custom amount.
+2. Before doing it, read back the details in one sentence and ask "Shall I go ahead?" — do NOT emit the tag yet.
+3. Only when the customer clearly confirms (yes / go ahead / confirm / do it), reply with a short confirmation of what was done ("Done — booking your fixed deposit of ₹1,00,000 for 18 months at 6.75%…") and put the ACTION tag at the very end. One action per reply.
+4. If they change their mind or the balance is insufficient, say so and do not emit a tag.
+The tags are hidden from the customer; never mention them.`;
 
     const kbResult = searchZoraKnowledge(userQuery);
     const matchedGuide = kbResult?.matchedQuestion;
@@ -604,47 +818,48 @@ Payment channels you can offer for the card: Savings account direct debit, any d
       parts: [{ text: userQuery }],
     });
 
-    const { response, model } = await generateWithFallback({
-      contents,
-      systemInstruction: `${systemInstruction}
-${matchedGuide ? `\nOFFICIAL BANKING GUIDE REFERENCE FOR THIS INQUIRY (use it for procedure, keep the figures from CUSTOMER DATA):\n${matchedGuide.question}\nAnswer: ${matchedGuide.answer}` : ''}`,
-      temperature: 0.4,
-      maxOutputTokens: 1000,
-    });
 
-    const replyText = response.text || "";
-    if (!replyText.trim()) throw new Error(`Empty reply from ${model}`);
+    const VOICE_STYLE = voice
+      ? `
+
+VOICE MODE: the customer is talking to you and hears every word you write through a voice engine, while a screen beneath the voice orb can show a card.
+- Speak like a warm, competent relationship manager on a call: one to three short sentences, under 45 words, plain spoken English. No lists, no markdown, no symbols, no abbreviations (say "per annum", "account", "U T R").
+- Never read out tables or several figures in a row. When the answer contains multiple numbers (account balances, a summary, updates, statement lines, loan or deposit details, penalties, offers), speak only the headline — e.g. "Your total balance across accounts is fourteen lakh ninety-five thousand rupees" — then say "I've put the details below for you", and attach the details as a display block at the very END of the reply:
+  [SHOW:Title|Label=Value|Label=Value|…]
+  Up to 8 rows per block, values with ₹ and Indian commas, up to 3 blocks. The block is rendered as a card and never spoken.
+- For a single figure (one balance, the due date, the minimum due) just say it — no SHOW block needed.
+- End with a short natural follow-up question when it helps.
+- INTENT and ACTION tag rules still apply; put any tags after the SHOW block(s).`
+      : "";
+
+    const fullSystem = `${systemInstruction}${VOICE_STYLE}
+${matchedGuide ? `\nOFFICIAL BANKING GUIDE REFERENCE FOR THIS INQUIRY (background only — the ACTIONS section above is authoritative for anything you can do in this chat, and CUSTOMER DATA for figures):\n${matchedGuide.question}\nAnswer: ${matchedGuide.answer}` : ''}`;
 
     // The model tags the intent from the full context; the keyword detectors are only a
     // safety net for replies where it forgot the tag.
-    const tagged = replyText.match(/\[INTENT:(ACCOUNT_SUMMARY|PAY_CREDIT_CARD|CARD_DUE|UPDATES)\]/)?.[1] || null;
-    let detectedIntent: string | null = tagged;
-    if (!detectedIntent) {
-      if (isSummaryQuery) detectedIntent = "ACCOUNT_SUMMARY";
-      else if (isCardPayQuery) detectedIntent = "PAY_CREDIT_CARD";
-      else if (isUpdatesQuery) detectedIntent = "UPDATES";
-      else if (isCardDueQuery || isPenaltyQuery) detectedIntent = "CARD_DUE";
-    }
+    const detectIntent = (replyText: string): string | null => {
+      const tagged = replyText.match(/\[INTENT:(ACCOUNT_SUMMARY|PAY_CREDIT_CARD|CARD_DUE|UPDATES)\]/)?.[1] || null;
+      if (tagged) return tagged;
+      if (/\[ACTION:/.test(replyText)) return null;
+      // mid-conversation (collecting details / asking to confirm) — don't pop the manual pay panel
+      if (/shall i go ahead|would you like me to|which (amount|tenure|option)|how much|for how (long|many)/i.test(replyText) && isCardPayQuery) return null;
+      if (isSummaryQuery) return "ACCOUNT_SUMMARY";
+      if (isCardPayQuery) return "PAY_CREDIT_CARD";
+      if (isUpdatesQuery) return "UPDATES";
+      if (isCardDueQuery || isPenaltyQuery) return "CARD_DUE";
+      return null;
+    };
 
-    const cleanedText = replyText
-      .replace(/\[INTENT:[A-Z_]+\]/g, "")
-      .trim();
-
-    return res.json({
-      success: true,
-      text: cleanedText,
-      reply: cleanedText,
-      intent: detectedIntent,
-      card: coreCreditCard,
-      source: "gemini",
-      model,
-    });
-  } catch (err: any) {
-    console.warn("[India Bank AI Chat] Fallback to banking context model:", String(err?.message || err).slice(0, 200));
-
-    const kbResult = searchZoraKnowledge(userQuery);
-    const matchedGuide = kbResult?.matchedQuestion;
-
+    const computeFallback = (): { text: string; intent: string | null; action: ChatAction | null; display: DisplayBlock[] } => {
+      const savingsBalance = dashboard?.accounts?.find((a) => a.type === "Savings")?.balance ?? 124560.5;
+      const dialogue = fallbackActionDialogue(userQuery, Array.isArray(history) ? history : [], {
+        fmt,
+        cardOutstanding,
+        cardMinDue,
+        savingsBalance,
+        firstName: userName.split(" ")[0],
+      });
+      if (dialogue) return { text: dialogue.text, intent: null, action: dialogue.action, display: [] as DisplayBlock[] };
     let fallbackReply = "";
     let detectedIntent: string | null = null;
 
@@ -671,7 +886,7 @@ ${matchedGuide ? `\nOFFICIAL BANKING GUIDE REFERENCE FOR THIS INQUIRY (use it fo
 
 • Savings Account (AC1000231234): ₹1,24,560.50 (Active • 4.00% p.a.)
 • Current Account (AC1000235678): ₹8,75,000.00 (Active • Business)
-• Fixed Deposit (FD8829109101): ₹5,00,000.00 (High-Yield 6.75% • Matures 12 Sep 2026)
+• Fixed Deposit (FD8829109101): ₹5,00,000.00 (High-Yield 6.75% • matures in about 6 months)
 • Royale Infinite Credit Card (•••• 8842): ₹${cardOutstanding.toLocaleString("en-IN")} Due (Limit: ₹${(cardLimit / 100000).toFixed(1)}L • Min Due: ₹${cardMinDue.toLocaleString("en-IN")})
 • Smart Personal Loan (PL882910): ₹3,42,100.00 Outstanding (EMI: ₹18,450/month)
 • Wealth & Mutual Funds: ₹8,14,200.00 (+25.2% Overall Return)
@@ -693,7 +908,7 @@ Select your preferred payment method below to proceed.`;
     } else if (cleanQuery.includes("saving") || cleanQuery.includes("balance")) {
       fallbackReply = `Your Primary Savings Account (AC1000231234) has an active balance of ₹1,24,560.50 with an interest rate of 4.00% p.a. Your branch is Nariman Point, Mumbai (IFSC: INBA0001042).`;
     } else if (cleanQuery.includes("fd") || cleanQuery.includes("fixed deposit")) {
-      fallbackReply = `Your Fixed Deposit (FD8829109101) holds ₹5,00,000.00 earning 6.75% p.a. guaranteed interest. The deposit matures on 12 Sep 2026 with an expected maturity payout of ₹5,34,500.00.`;
+      fallbackReply = `Your Fixed Deposit (FD8829109101) holds ₹5,00,000.00 earning 6.75% p.a. guaranteed interest. The deposit matures in about 6 months with an expected maturity payout of ₹5,34,500.00.`;
     } else if (cleanQuery.includes("loan") || cleanQuery.includes("emi")) {
       fallbackReply = `Your Smart Personal Loan (PL882910) has an outstanding balance of ₹3,42,100.00 at 10.50% p.a. Your monthly EMI of ₹18,450.00 is scheduled for auto-debit on the 1st of each month. 22 EMIs remaining.`;
     } else if (cleanQuery.includes("invest") || cleanQuery.includes("mutual fund") || cleanQuery.includes("wealth")) {
@@ -702,15 +917,367 @@ Select your preferred payment method below to proceed.`;
       fallbackReply = kbResult?.answer || `Hello ${userName}! I am Zora, your 24x7 India Bank Assistant. I can help you review your accounts, inspect loans and deposits, pay credit card bills, or handle grievance redressal. How can I help you today?`;
     }
 
+      if (voice) {
+        // Spoken mode: say the headline, show the figures as a card.
+        const accounts = dashboard?.accounts?.length ? dashboard.accounts : [];
+        const total = accounts.reduce((a, b) => a + b.balance, 0) || 1499560.5;
+        const first = userName.split(" ")[0];
+        if (detectedIntent === "ACCOUNT_SUMMARY") {
+          return {
+            text: `${first}, your total balance across your accounts is ${fmt(total)}, and your credit card has ${fmt(cardOutstanding)} due on ${cardDueDate}. I've put the full picture below for you. Anything you'd like to act on?`,
+            intent: detectedIntent,
+            action: null,
+            display: [
+              {
+                title: "Account summary",
+                rows: [
+                  ...accounts.map((a) => ({ label: `${a.name} ${a.maskedNumber}`, value: fmt(a.balance) })),
+                  { label: "Credit card due", value: `${fmt(cardOutstanding)} by ${cardDueDate}` },
+                  { label: "Personal loan outstanding", value: "₹3,42,100.00 · EMI ₹18,450" },
+                  { label: "Investments", value: "₹8,14,200.00 (+25.2%)" },
+                ],
+              },
+            ],
+          };
+        }
+        if (detectedIntent === "UPDATES") {
+          return {
+            text: `Here's what's new, ${first}: your credit card statement of ${fmt(cardOutstanding)} is due on ${cardDueDate}, your loan E M I goes out on the first, and your fixed deposit matures in about six months. I've listed everything below. Want me to pay the card bill?`,
+            intent: detectedIntent,
+            action: null,
+            display: [
+              {
+                title: "Updates for you",
+                rows: [
+                  { label: "Credit card", value: cardOutstanding > 0 ? `${fmt(cardOutstanding)} due ${cardDueDate} · min ${fmt(cardMinDue)}` : "Fully paid" },
+                  { label: "Loan EMI", value: "₹18,450.00 on the 1st · 22 left" },
+                  { label: "Fixed deposit", value: "₹5,00,000 matures in ~6 months" },
+                  { label: "Salary", value: "₹75,000.00 credited this month" },
+                  { label: "Reward points", value: "14,250 (≈ ₹3,562)" },
+                  { label: "Offer", value: "FD at 6.75% p.a. till 30 Sep 2026" },
+                ],
+              },
+            ],
+          };
+        }
+        if (detectedIntent === "CARD_DUE" && isPenaltyQuery) {
+          return {
+            text: `If the ${fmt(cardOutstanding)} isn't paid by ${cardDueDate}, there's a late fee of thirteen hundred rupees plus interest at 3.49 percent a month, and G S T on top. Paying at least the minimum of ${fmt(cardMinDue)} avoids the late fee. The full schedule is below. Shall I pay it now?`,
+            intent: detectedIntent,
+            action: null,
+            display: [
+              {
+                title: "If the bill is missed",
+                rows: [
+                  { label: "Late payment fee", value: "₹1,300 (due above ₹50,000)" },
+                  { label: "Finance charge", value: "3.49% per month (41.88% p.a.)" },
+                  { label: "GST", value: "18% on fees" },
+                  { label: "Credit bureau", value: "Reported after 30 days" },
+                  { label: "Minimum to avoid fee", value: fmt(cardMinDue) },
+                ],
+              },
+            ],
+          };
+        }
+        if (detectedIntent === "CARD_DUE") {
+          return {
+            text: cardOutstanding > 0 ? `Your credit card has ${fmt(cardOutstanding)} due on ${cardDueDate}, with a minimum of ${fmt(cardMinDue)}. The details are below. Would you like to pay it now?` : `Good news — there's nothing due on your credit card right now.`,
+            intent: detectedIntent,
+            action: null,
+            display: [],
+          };
+        }
+        if (detectedIntent === "PAY_CREDIT_CARD") {
+          return { text: `Your card has ${fmt(cardOutstanding)} due, minimum ${fmt(cardMinDue)}. How much would you like to pay, and should I take it from your savings account or show a QR to scan?`, intent: null, action: null, display: [] };
+        }
+      }
+      return { text: fallbackReply, intent: detectedIntent, action: null, display: [] };
+    };
+
+    return { userQuery, contents, fullSystem, detectIntent, computeFallback };
+}
+
+const stripIntentTags = (t: string) => t.replace(/\[(?:INTENT|ACTION|SHOW):[^\]]*\]/g, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+
+interface DisplayBlock {
+  title: string;
+  rows: { label: string; value: string }[];
+}
+
+/** Pulls `[SHOW:Title|Label=Value|…]` blocks out of a reply (rendered as cards, never spoken). */
+function parseDisplayBlocks(text: string): DisplayBlock[] {
+  const blocks: DisplayBlock[] = [];
+  for (const m of text.matchAll(/\[SHOW:([^\]]*)\]/g)) {
+    const parts = m[1].split("|").map((p) => p.trim()).filter(Boolean);
+    if (!parts.length) continue;
+    const title = parts[0];
+    const rows = parts.slice(1).map((p) => {
+      const i = p.indexOf("=");
+      return i > 0 ? { label: p.slice(0, i).trim(), value: p.slice(i + 1).trim() } : { label: "", value: p };
+    });
+    if (rows.length) blocks.push({ title, rows: rows.slice(0, 8) });
+  }
+  return blocks.slice(0, 3);
+}
+
+interface ChatAction {
+  type: "OPEN_FD" | "CHEQUE_BOOK" | "PAY_CARD" | "REQUEST";
+  params: Record<string, string>;
+}
+
+/** Pulls `[ACTION:TYPE key=value …]` out of a reply. */
+function parseAction(text: string): ChatAction | null {
+  const m = text.match(/\[ACTION:(OPEN_FD|CHEQUE_BOOK|PAY_CARD|REQUEST)([^\]]*)\]/);
+  if (!m) return null;
+  // The model must confirm first; a tag on a "shall I go ahead?" turn is premature and ignored.
+  if (/shall i (go ahead|proceed)|would you like me to (go ahead|proceed)|do you confirm|please confirm/i.test(text.replace(/\[[^\]]*\]/g, ""))) return null;
+  const params: Record<string, string> = {};
+  for (const kv of m[2].trim().split(/\s+/)) {
+    const i = kv.indexOf("=");
+    if (i <= 0) continue;
+    const k = kv.slice(0, i).toLowerCase();
+    const v = kv.slice(i + 1);
+    params[k] = k === "note" ? v.replace(/_/g, " ") : v.replace(/[₹,]/g, "");
+  }
+  let type = m[1] as ChatAction["type"];
+  if (type === "REQUEST" && /cheque/i.test(`${params.type || ""} ${params.note || ""}`) && !/stop/i.test(params.type || "")) {
+    // the model used the generic request for a cheque book — map it to the dedicated action
+    const note = params.note || "";
+    type = "CHEQUE_BOOK";
+    params.leaves = params.leaves || note.match(/\b(25|50|100)\b/)?.[1] || "25";
+    params.account = params.account || (/current/i.test(note) ? "current" : "savings");
+    params.delivery = params.delivery || (/branch|pick/i.test(note) ? "branch" : "registered");
+  }
+  return { type, params };
+}
+
+app.post("/api/ai/chat", async (req, res) => {
+  const prep = prepareChat(req.body);
+  if (!prep) return res.status(400).json({ error: "Message is required" });
+
+  try {
+    if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY not configured");
+    if (req.body?.offline) throw new Error("offline engine requested");
+    const { response, model } = await generateWithFallback({
+      contents: prep.contents,
+      systemInstruction: prep.fullSystem,
+      temperature: 0.4,
+      maxOutputTokens: 2048,
+    });
+    const replyText = response.text || "";
+    if (!replyText.trim()) throw new Error(`Empty reply from ${model}`);
+    const cleanedText = stripIntentTags(replyText);
     return res.json({
       success: true,
-      text: fallbackReply,
-      reply: fallbackReply,
-      intent: detectedIntent,
+      text: cleanedText,
+      reply: cleanedText,
+      intent: prep.detectIntent(replyText),
+      action: parseAction(replyText),
+      display: parseDisplayBlocks(replyText),
+      card: coreCreditCard,
+      source: "gemini",
+      model,
+    });
+  } catch (err: any) {
+    console.warn("[India Bank AI Chat] Fallback to banking context model:", String(err?.message || err).slice(0, 200));
+    const fb = prep.computeFallback();
+    return res.json({
+      success: true,
+      text: fb.text,
+      reply: fb.text,
+      intent: fb.intent,
+      action: fb.action,
+      display: fb.display,
       source: "fallback",
       card: coreCreditCard,
       fallback: true,
     });
+  }
+});
+
+/**
+ * Streaming variant: Server-Sent Events. Each `delta` arrives as Gemini produces it so the
+ * first words reach the screen (and the voice engine) within a few hundred milliseconds.
+ * A final `done` event carries the intent and card state.
+ */
+app.post("/api/ai/chat/stream", async (req, res) => {
+  const prep = prepareChat(req.body);
+  if (!prep) return res.status(400).json({ error: "Message is required" });
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+  const send = (obj: Record<string, unknown>) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
+  let emitted = "";
+  let full = "";
+  const pushDelta = (final = false) => {
+    // Hold back a trailing "[..." until we know whether it is the intent tag.
+    let safe = full;
+    if (!final) {
+      const idx = full.lastIndexOf("[");
+      if (idx >= 0 && full.indexOf("]", idx) < 0) safe = full.slice(0, idx);
+    }
+    const clean = safe.replace(/\[(?:INTENT|ACTION|SHOW):[^\]]*\]/g, "");
+    if (clean.length > emitted.length) {
+      send({ delta: clean.slice(emitted.length) });
+      emitted = clean;
+    }
+  };
+
+  try {
+    if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY not configured");
+    if (req.body?.offline) throw new Error("offline engine requested");
+    let lastErr: any = null;
+    let usedModel = "";
+    for (const model of availableModels()) {
+      let started = false;
+      try {
+        const stream = await ai.models.generateContentStream({
+          model,
+          contents: prep.contents,
+          config: genConfig(model, prep.fullSystem, 0.4, 1024),
+        });
+        for await (const chunk of stream) {
+          const t = chunk.text;
+          if (!t) continue;
+          if (!started) {
+            started = true;
+            send({ start: true, model });
+          }
+          full += t;
+          pushDelta();
+        }
+        if (!full.trim()) throw new Error(`Empty reply from ${model}`);
+        usedModel = model;
+        break;
+      } catch (err: any) {
+        lastErr = err;
+        if (started && full.trim()) {
+          usedModel = model; // partial answer already on screen — finish with what we have
+          break;
+        }
+        if (isInvalidArgument(err) && !noThinkingConfig.has(model)) {
+          noThinkingConfig.add(model);
+          try {
+            const stream = await ai.models.generateContentStream({ model, contents: prep.contents, config: genConfig(model, prep.fullSystem, 0.4, 1024) });
+            for await (const chunk of stream) {
+              const t = chunk.text;
+              if (!t) continue;
+              if (!started) {
+                started = true;
+                send({ start: true, model });
+              }
+              full += t;
+              pushDelta();
+            }
+            if (full.trim()) {
+              usedModel = model;
+              break;
+            }
+          } catch (err2: any) {
+            lastErr = err2;
+          }
+          continue;
+        }
+        if (!isTransientGeminiError(err)) throw err;
+        coolDown(model);
+        console.warn(`[India Bank AI Chat] stream ${model} unavailable: ${String(err?.message || err).slice(0, 120)}`);
+      }
+    }
+    if (!usedModel) throw lastErr || new Error("No Gemini model available");
+    pushDelta(true);
+    send({ done: true, intent: prep.detectIntent(full), action: parseAction(full), display: parseDisplayBlocks(full), card: coreCreditCard, source: "gemini", model: usedModel, text: stripIntentTags(full) });
+  } catch (err: any) {
+    console.warn("[India Bank AI Chat] stream fallback:", String(err?.message || err).slice(0, 200));
+    const fb = prep.computeFallback();
+    if (!emitted) send({ start: true, model: "fallback" });
+    send({ delta: fb.text });
+    send({ done: true, intent: fb.intent, action: fb.action, display: fb.display, card: coreCreditCard, source: "fallback", text: fb.text });
+  }
+  res.end();
+});
+
+// ==========================================
+// VOICE: ElevenLabs text-to-speech / speech-to-text
+// ==========================================
+const ELEVEN = {
+  apiKey: process.env.ELEVENLABS_API_KEY || "",
+  voiceId: process.env.ELEVENLABS_VOICE_ID || "",
+  // Premade voice that works on every ElevenLabs plan; used when the configured voice is refused.
+  fallbackVoiceId: process.env.ELEVENLABS_FALLBACK_VOICE_ID || "EXAVITQu4vr4xnSDxMaL",
+  model: process.env.ELEVENLABS_MODEL || "eleven_flash_v2_5",
+};
+if (!ELEVEN.apiKey) console.warn("[India Bank] ELEVENLABS_API_KEY not set — Zora will use the browser's built-in voice.");
+let ttsVoiceRefused = false; // remembered after the first 402/404 so every sentence does not retry it
+
+app.get("/api/voice/config", (_req, res) => {
+  res.json({ tts: !!ELEVEN.apiKey, stt: !!ELEVEN.apiKey, voiceId: ttsVoiceRefused || !ELEVEN.voiceId ? ELEVEN.fallbackVoiceId : ELEVEN.voiceId });
+});
+
+app.post("/api/voice/tts", async (req, res) => {
+  const text = String(req.body?.text || "").trim().slice(0, 1500);
+  if (!text) return res.status(400).json({ error: "text required" });
+  if (!ELEVEN.apiKey) return res.status(503).json({ error: "tts_unconfigured" });
+
+  const candidates = Array.from(new Set([!ttsVoiceRefused && ELEVEN.voiceId, ELEVEN.fallbackVoiceId].filter(Boolean) as string[]));
+  let lastStatus = 0;
+  let lastBody = "";
+  for (const voiceId of candidates) {
+    try {
+      const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=mp3_22050_32&optimize_streaming_latency=3`, {
+        method: "POST",
+        headers: { "xi-api-key": ELEVEN.apiKey, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text,
+          model_id: ELEVEN.model,
+          voice_settings: { stability: 0.45, similarity_boost: 0.8, style: 0.25, use_speaker_boost: true },
+        }),
+      });
+      if (r.ok && r.body) {
+        res.setHeader("Content-Type", "audio/mpeg");
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("X-Voice-Id", voiceId);
+        for await (const chunk of r.body as any) res.write(Buffer.from(chunk));
+        res.end();
+        return;
+      }
+      lastStatus = r.status;
+      lastBody = (await r.text()).slice(0, 300);
+      if ((r.status === 402 || r.status === 404 || r.status === 403) && voiceId === ELEVEN.voiceId) {
+        ttsVoiceRefused = true;
+        console.warn(`[India Bank Voice] Voice ${voiceId} refused (${r.status}); falling back to ${ELEVEN.fallbackVoiceId}. ${lastBody}`);
+        continue;
+      }
+      break;
+    } catch (err: any) {
+      lastBody = String(err?.message || err);
+    }
+  }
+  console.warn(`[India Bank Voice] TTS failed (${lastStatus}): ${lastBody}`);
+  res.status(502).json({ error: "tts_failed", status: lastStatus });
+});
+
+// Speech-to-text fallback for browsers without the Web Speech API (raw audio body → ElevenLabs Scribe).
+app.post("/api/voice/stt", express.raw({ type: () => true, limit: "15mb" }), async (req, res) => {
+  if (!ELEVEN.apiKey) return res.status(503).json({ error: "stt_unconfigured" });
+  const audio = req.body as Buffer;
+  if (!audio || !audio.length) return res.status(400).json({ error: "audio required" });
+  try {
+    const form = new FormData();
+    const type = (req.headers["content-type"] as string) || "audio/webm";
+    form.append("file", new Blob([audio], { type }), `speech.${type.includes("mp4") ? "m4a" : type.includes("mpeg") ? "mp3" : "webm"}`);
+    form.append("model_id", "scribe_v1");
+    form.append("language_code", "en");
+    form.append("tag_audio_events", "false");
+    const r = await fetch("https://api.elevenlabs.io/v1/speech-to-text", { method: "POST", headers: { "xi-api-key": ELEVEN.apiKey }, body: form });
+    const data: any = await r.json();
+    if (!r.ok) return res.status(502).json({ error: "stt_failed", detail: data });
+    res.json({ text: String(data.text || "").trim(), language: data.language_code });
+  } catch (err: any) {
+    res.status(502).json({ error: "stt_failed", detail: String(err?.message || err) });
   }
 });
 

@@ -26,6 +26,7 @@ interface QuickActionModalsProps {
   accounts: BankAccount[];
   creditData: CreditScoreData;
   onTransferSuccess?: (amount: number, description: string, payee: string) => void;
+  onDepositBooked?: (amount: number, tenureMonths: number) => void;
   onOpenGrievance?: () => void;
 }
 
@@ -35,6 +36,7 @@ export const QuickActionModals: React.FC<QuickActionModalsProps> = ({
   accounts,
   creditData,
   onTransferSuccess,
+  onDepositBooked,
   onOpenGrievance,
 }) => {
   if (!modalType) return null;
@@ -426,7 +428,10 @@ export const QuickActionModals: React.FC<QuickActionModalsProps> = ({
                 </div>
 
                 <button
-                  onClick={() => setFdBooked(true)}
+                  onClick={() => {
+                    onDepositBooked?.(principal, fdTenureMonths);
+                    setFdBooked(true);
+                  }}
                   className="w-full py-2.5 rounded-md bg-indigo-600 text-white font-semibold text-xs hover:bg-indigo-700 transition-colors cursor-pointer"
                 >
                   Book Fixed Deposit Now

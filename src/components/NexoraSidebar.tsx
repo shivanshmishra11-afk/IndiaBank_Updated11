@@ -13,6 +13,9 @@ import {
   ArrowUpRight,
   PhoneCall,
   X,
+  FileText,
+  Users,
+  PiggyBank,
 } from 'lucide-react';
 import { NavTab } from '../types';
 
@@ -37,6 +40,7 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       { id: 'home', label: 'Home', icon: Home },
       { id: 'accounts', label: 'Accounts', icon: Building2 },
+      { id: 'statements', label: 'Statements', icon: FileText },
       { id: 'cards', label: 'Cards', icon: CreditCard },
     ],
   },
@@ -45,11 +49,13 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       { id: 'payments', label: 'Payments', icon: Send },
       { id: 'transfers', label: 'Transfers', icon: ArrowLeftRight },
+      { id: 'beneficiaries', label: 'Beneficiaries', icon: Users },
     ],
   },
   {
     title: 'Grow',
     items: [
+      { id: 'deposits', label: 'Deposits', icon: PiggyBank },
       { id: 'investments', label: 'Investments', icon: TrendingUp },
       { id: 'loans', label: 'Loans', icon: Coins },
     ],
@@ -58,7 +64,7 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     title: 'More',
     items: [
       { id: 'offers', label: 'Offers', icon: Tag, badge: 'New' },
-      { id: 'services', label: 'Services', icon: Grid },
+      { id: 'services', label: 'Services & requests', icon: Grid },
       { id: 'complaints', label: 'Grievance & dispute', icon: PhoneCall },
     ],
   },

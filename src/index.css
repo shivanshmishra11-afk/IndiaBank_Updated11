@@ -626,3 +626,97 @@ button,
     display: none;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Zora voice orb                                                      */
+/* ------------------------------------------------------------------ */
+.ib-orb {
+  position: relative;
+  display: block;
+  width: 168px;
+  height: 168px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.55), transparent 42%),
+    linear-gradient(135deg, #818cf8 0%, #6366f1 35%, #7c3aed 70%, #c084fc 100%);
+  box-shadow:
+    0 24px 60px rgba(79, 70, 229, 0.28),
+    inset 0 -20px 40px rgba(30, 27, 75, 0.35),
+    inset 0 10px 30px rgba(255, 255, 255, 0.3);
+  transition: border-radius 0.6s var(--ease-out), transform 0.6s var(--ease-out), filter 0.6s var(--ease-out);
+  will-change: border-radius, transform;
+}
+.ib-orb-core {
+  position: absolute;
+  inset: 22%;
+  border-radius: inherit;
+  background: radial-gradient(circle at 50% 45%, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0) 70%);
+  filter: blur(6px);
+}
+.ib-orb-shine {
+  position: absolute;
+  top: 12%;
+  left: 18%;
+  width: 34%;
+  height: 22%;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.55);
+  filter: blur(8px);
+  transform: rotate(-20deg);
+}
+/* idle: slow breathing */
+.ib-orb--idle {
+  animation: ib-orb-breathe 4.5s ease-in-out infinite;
+}
+/* listening: floats and wobbles like a water drop */
+.ib-orb--listening {
+  animation: ib-orb-drop 3.2s ease-in-out infinite;
+}
+/* thinking: slow turn with a shifting hue */
+.ib-orb--thinking {
+  animation: ib-orb-think 2.4s linear infinite;
+}
+/* paused: still and dimmed */
+.ib-orb--paused {
+  border-radius: 50%;
+  transform: scale(0.94);
+  filter: saturate(0.35) brightness(1.05);
+}
+/* speaking: perfectly still, brighter */
+.ib-orb--speaking {
+  border-radius: 50%;
+  transform: scale(1.04);
+  filter: brightness(1.12) saturate(1.1);
+}
+.ib-orb-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(99, 102, 241, 0.45);
+  animation: ib-orb-ring 1.8s ease-out infinite;
+  pointer-events: none;
+}
+@keyframes ib-orb-breathe {
+  0%, 100% { transform: scale(1) translateY(0); }
+  50% { transform: scale(1.03) translateY(-4px); }
+}
+@keyframes ib-orb-drop {
+  0% { border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%; transform: translateY(0) rotate(0deg) scale(1); }
+  20% { border-radius: 58% 42% 55% 45% / 48% 58% 42% 52%; transform: translateY(-10px) rotate(-3deg) scale(1.02); }
+  40% { border-radius: 42% 58% 45% 55% / 55% 45% 55% 45%; transform: translateY(-16px) rotate(2deg) scale(0.99); }
+  60% { border-radius: 55% 45% 40% 60% / 45% 55% 60% 40%; transform: translateY(-8px) rotate(4deg) scale(1.03); }
+  80% { border-radius: 45% 55% 60% 40% / 62% 42% 48% 58%; transform: translateY(-14px) rotate(-2deg) scale(1); }
+  100% { border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%; transform: translateY(0) rotate(0deg) scale(1); }
+}
+@keyframes ib-orb-think {
+  0% { transform: rotate(0deg) scale(0.98); filter: hue-rotate(0deg); }
+  50% { transform: rotate(180deg) scale(1.02); filter: hue-rotate(-25deg); }
+  100% { transform: rotate(360deg) scale(0.98); filter: hue-rotate(0deg); }
+}
+@keyframes ib-orb-ring {
+  0% { transform: scale(1); opacity: 0.7; }
+  100% { transform: scale(1.55); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ib-orb--idle, .ib-orb--listening, .ib-orb--thinking, .ib-orb-ring { animation: none; }
+}

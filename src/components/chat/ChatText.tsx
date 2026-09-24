@@ -63,13 +63,13 @@ interface StreamingTextProps {
 /** Per-token reveal schedule (ms from start). Human-like: slower after punctuation and line breaks. */
 function buildSchedule(tokens: string[]): number[] {
   const schedule: number[] = [];
-  let t = 260; // brief "composing" pause before the first word
+  let t = 80; // canned replies (receipts, confirmations) reveal quickly — live answers stream from the model
   tokens.forEach((tok) => {
     schedule.push(t);
-    let delay = 42 + Math.random() * 38;
-    if (/[.!?]\s*$/.test(tok)) delay += 180;
-    else if (/[,;:]\s*$/.test(tok)) delay += 80;
-    if (/\n/.test(tok)) delay += 160;
+    let delay = 14 + Math.random() * 12;
+    if (/[.!?]\s*$/.test(tok)) delay += 90;
+    else if (/[,;:]\s*$/.test(tok)) delay += 40;
+    if (/\n/.test(tok)) delay += 80;
     t += delay;
   });
   return schedule;

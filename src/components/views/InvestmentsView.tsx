@@ -2,19 +2,26 @@ import React, { useState } from 'react';
 import { Landmark, TrendingUp, Coins, ArrowUpRight, PiggyBank } from 'lucide-react';
 import { Page, PageHeader, Card, CardHeader, Badge, StatTile } from '../ui/Primitives';
 import { formatINR } from '../../utils/format';
+import { useBank } from '../../store/BankStore';
 
 interface InvestmentsViewProps {
   onOpenFdModal: () => void;
 }
 
-const HOLDINGS = [
-  { name: 'Fixed Deposit · FD8829109101', type: 'Deposit', value: 500000, change: '+6.75% p.a.', positive: true },
+const FUND_HOLDINGS = [
   { name: 'Nifty 50 Index Fund (Direct)', type: 'Mutual fund', value: 312400, change: '+28.4%', positive: true },
   { name: 'Flexi Cap Fund (Direct)', type: 'Mutual fund', value: 286900, change: '+22.1%', positive: true },
   { name: 'Corporate Bond Fund', type: 'Debt', value: 214900, change: '+7.9%', positive: true },
 ];
 
 export const InvestmentsView: React.FC<InvestmentsViewProps> = ({ onOpenFdModal }) => {
+  const { accounts } = useBank();
+  const HOLDINGS = [
+    ...accounts
+      .filter((a) => a.type === 'Fixed Deposit' || a.type === 'Recurring Deposit')
+      .map((a) => ({ name: `${a.name} · ${a.accountNumber}`, type: 'Deposit', value: a.balance, change: `+${a.interestRate}`, positive: true })),
+    ...FUND_HOLDINGS,
+  ];
   const [calcAmount, setCalcAmount] = useState('200000');
   const [calcTenure, setCalcTenure] = useState(24);
 
