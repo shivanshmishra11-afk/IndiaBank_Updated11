@@ -62,6 +62,8 @@ interface ChatMsg {
   attachment?: Attachment;
   /** final result shown as a card (and in the voice session) */
   outcome?: Outcome;
+  /** tappable choices Zora offered (voice session) */
+  options?: string[];
 }
 
 interface ChatAction {
@@ -333,9 +335,11 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
               if (!action && evt.intent === 'CARD_DUE' && (evt.card || card)) outcome = { type: 'card-due', card: evt.card || card };
               if (!action && evt.intent === 'ACCOUNT_SUMMARY') outcome = { type: 'summary', accounts: bank.accounts, card: evt.card || card };
               if (!action && Array.isArray(evt.display) && evt.display.length) outcome = { type: 'facts', sections: evt.display };
+              const options: string[] = Array.isArray(evt.options) ? evt.options : [];
+              const finalAttachment = attachment || (options.length && !voiceSession ? { kind: 'suggestions' as const, items: options } : undefined);
               setThinking(false);
-              if (!started) setMessages((prev) => [...prev, { id: msgId, role: 'zora', text: finalText, live: false, attachment, outcome }]);
-              else setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, text: finalText, live: false, attachment, outcome } : m)));
+              if (!started) setMessages((prev) => [...prev, { id: msgId, role: 'zora', text: finalText, live: false, attachment: finalAttachment, outcome, options }]);
+              else setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, text: finalText, live: false, attachment: finalAttachment, outcome, options } : m)));
               utterance?.end();
               if (!utterance && !started) speak(finalText);
               if (action) void runAction(action, msgId);
@@ -432,8 +436,11 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
   const startVoiceSession = () => {
     setShowGuide(false);
     voice.unlockAudio(); // inside the tap, so the browser lets Zora speak
+    const greeting = `Hi ${name}, this is Zora. I'm listening — how can I help you today?`;
+    // Every voice session starts fresh: no earlier cards, no earlier context.
+    setMessages([{ id: uid(), role: 'zora', text: greeting, options: ['What is my card due?', 'Pay my card bill', 'Show my balances', 'Open a fixed deposit', 'I need a cheque book'] }]);
     setVoiceSession(true);
-    voice.setHandsFree(true, { greeting: `Hi ${name}, this is Zora. I'm listening — how can I help you today?` });
+    voice.setHandsFree(true, { greeting });
   };
   const endVoiceSession = useCallback(() => {
     setVoiceSession(false);
@@ -442,6 +449,7 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
 
   const orbState: OrbState = voice.paused ? 'paused' : voice.listening ? 'listening' : voice.speaking ? 'speaking' : thinking || streamingSomething || voice.transcribing ? 'thinking' : 'idle';
   const lastZoraMsg = [...messages].reverse().find((m) => m.role === 'zora' && !m.live)?.text;
+  const lastZoraOptions = (thinking || streamingSomething) ? [] : [...messages].reverse().find((m) => m.role === 'zora' && !m.live)?.options || [];
   // Only the outcome of the latest answer is shown; asking something new clears it.
   const lastUserIdx = messages.map((m) => m.role).lastIndexOf('user');
   const voiceOutcomes = messages
@@ -807,12 +815,20 @@ export const NexoraAiAssistant: React.FC<NexoraAiAssistantProps> = ({ isOpen, on
       <VoiceSession
         open={voiceSession}
         state={orbState}
-        caption={voiceSession && lastZoraMsg && lastUserIdx >= 0 && messages.findIndex((m) => m.text === lastZoraMsg) > lastUserIdx ? plainText(lastZoraMsg).slice(0, 220) : undefined}
+        caption={voiceSession && lastZoraMsg && !thinking ? plainText(lastZoraMsg) : undefined}
+        options={voiceSession ? lastZoraOptions : []}
+        onOption={(choice) => {
+          voice.stopSpeaking();
+          send(choice);
+        }}
+        muted={voice.muted}
+        onToggleMute={() => voice.setMuted(!voice.muted)}
         outcomes={voiceOutcomes}
         micAvailable={voice.recognitionSupported}
         audioBlocked={voice.audioBlocked}
         onTapOrb={() => {
           if (voice.paused) voice.setPaused(false);
+          else if (voice.speaking) voice.skip();
           else if (voice.listening) voice.stopListening();
           else {
             voice.unlockAudio();

@@ -7,7 +7,7 @@
  */
 import React, { useEffect, useRef } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { Mic, MicOff, Pause, Play, PhoneOff, Volume2, VolumeX, Sparkles } from 'lucide-react';
+import { Mic, MicOff, Pause, Play, PhoneOff, Volume2, VolumeX, Sparkles, SkipForward } from 'lucide-react';
 import type { CoreCreditCard, PaymentSession } from '../../types';
 import { OutcomeCard, Outcome } from './OutcomeCard';
 
@@ -18,8 +18,12 @@ interface VoiceSessionProps {
   state: OrbState;
   caption?: string;
   outcomes: { id: string; outcome: Outcome }[];
+  options: string[];
+  onOption: (choice: string) => void;
   micAvailable: boolean;
   audioBlocked: boolean;
+  muted: boolean;
+  onToggleMute: () => void;
   onTapOrb: () => void;
   onTogglePause: () => void;
   onEnableAudio: () => void;
@@ -37,7 +41,7 @@ const STATUS: Record<OrbState, string> = {
   paused: 'Paused',
 };
 
-export const VoiceSession: React.FC<VoiceSessionProps> = ({ open, state, caption, outcomes, micAvailable, audioBlocked, onTapOrb, onTogglePause, onEnableAudio, onEnd, onPay, onQrPaid, onOpenSimulator }) => {
+export const VoiceSession: React.FC<VoiceSessionProps> = ({ open, state, caption, outcomes, options, onOption, micAvailable, audioBlocked, muted, onToggleMute, onTapOrb, onTogglePause, onEnableAudio, onEnd, onPay, onQrPaid, onOpenSimulator }) => {
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -62,6 +66,7 @@ export const VoiceSession: React.FC<VoiceSessionProps> = ({ open, state, caption
   }, [outcomes.length]);
 
   const paused = state === 'paused';
+  const speaking = state === 'speaking';
 
   return (
     <AnimatePresence>
@@ -95,7 +100,8 @@ export const VoiceSession: React.FC<VoiceSessionProps> = ({ open, state, caption
             <button
               type="button"
               onClick={onTapOrb}
-              aria-label={state === 'listening' ? 'Stop listening' : 'Speak to Zora'}
+              aria-label={speaking ? 'Skip to the next sentence' : state === 'listening' ? 'Stop listening' : 'Speak to Zora'}
+              title={speaking ? 'Tap to skip ahead' : undefined}
               className="relative w-40 h-40 sm:w-48 sm:h-48 flex items-center justify-center cursor-pointer focus:outline-none focus-visible:ring-4 focus-visible:ring-indigo-500/20 rounded-full"
             >
               {state === 'speaking' && (
@@ -117,10 +123,15 @@ export const VoiceSession: React.FC<VoiceSessionProps> = ({ open, state, caption
 
             <motion.div key={state} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} className="mt-5 inline-flex items-center gap-2 h-8 px-3.5 rounded-full bg-white/80 border border-slate-200/80 text-[13px] font-semibold text-slate-700 shadow-sm">
               {state === 'listening' && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />}
-              {state === 'speaking' && <Volume2 className="w-3.5 h-3.5 text-indigo-600" />}
+              {speaking && (muted ? <VolumeX className="w-3.5 h-3.5 text-slate-400" /> : <Volume2 className="w-3.5 h-3.5 text-indigo-600" />)}
               {state === 'thinking' && <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />}
               {paused && <Pause className="w-3.5 h-3.5 text-slate-500" />}
               {STATUS[state]}
+              {speaking && (
+                <span className="ml-1 text-[11px] font-medium text-slate-400 inline-flex items-center gap-1">
+                  · tap orb to skip <SkipForward className="w-3 h-3" />
+                </span>
+              )}
             </motion.div>
 
             {audioBlocked && (
@@ -134,9 +145,18 @@ export const VoiceSession: React.FC<VoiceSessionProps> = ({ open, state, caption
           <div ref={listRef} className="relative w-full max-w-xl mx-auto flex-1 min-h-0 overflow-y-auto ib-scroll px-5 pt-5 pb-36 space-y-3">
             <AnimatePresence initial={false}>
               {caption && (
-                <motion.p key={caption.slice(0, 48)} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="text-center text-[15px] leading-relaxed text-slate-600 px-2">
+                <motion.p key={caption} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="text-center text-[15px] leading-relaxed text-slate-700 px-2">
                   {caption}
                 </motion.p>
+              )}
+              {options.length > 0 && !paused && (
+                <motion.div key={options.join('|')} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="flex flex-wrap justify-center gap-2 pt-1">
+                  {options.map((o) => (
+                    <button key={o} type="button" onClick={() => onOption(o)} className="h-10 px-4 rounded-full bg-white border border-slate-200 text-sm font-semibold text-slate-800 shadow-sm hover:border-indigo-400 hover:text-indigo-700 transition-colors cursor-pointer active:scale-95">
+                      {o}
+                    </button>
+                  ))}
+                </motion.div>
               )}
               {outcomes.map((o, i) => (
                 <motion.div
@@ -159,6 +179,14 @@ export const VoiceSession: React.FC<VoiceSessionProps> = ({ open, state, caption
             <button onClick={onTogglePause} className={`h-12 px-5 rounded-full inline-flex items-center gap-2 text-sm font-semibold border transition-colors cursor-pointer active:scale-95 shadow-sm ${paused ? 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700' : 'bg-white text-slate-800 border-slate-200 hover:bg-slate-50'}`}>
               {paused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
               {paused ? 'Resume' : 'Pause'}
+            </button>
+            <button
+              onClick={onToggleMute}
+              aria-pressed={muted}
+              title={muted ? 'Unmute Zora' : 'Mute Zora (session continues)'}
+              className={`w-12 h-12 rounded-full inline-flex items-center justify-center border transition-colors cursor-pointer active:scale-95 shadow-sm ${muted ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'}`}
+            >
+              {muted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
             </button>
             <button
               onClick={onTapOrb}

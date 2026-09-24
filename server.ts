@@ -37,14 +37,19 @@ if (!process.env.GEMINI_API_KEY) {
 
 // Preferred model first; the rest are fallbacks for capacity (503) / quota (429) errors.
 const GEMINI_MODELS = (process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL] : []).concat([
-  "gemini-3.6-flash",
-  "gemini-3.8-flash",
-  "gemini-2.5-flash",
-  "gemini-3.5-flash",
-  "gemini-3.7-flash",
-  "gemini-3.1-flash-lite",
+  // Lite models first: separate (larger) free-tier quota and lowest latency when healthy.
   "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  "gemini-3.8-flash",
+  "gemini-3.6-flash",
+  "gemini-2.5-flash",
+  "gemini-3.7-flash",
+  "gemini-3.5-flash",
 ]);
+
+// Answer-time budget: if Gemini has not produced anything by then, the built-in engine answers instantly.
+const GEMINI_BUDGET_MS = Number(process.env.GEMINI_BUDGET_MS || 7000);
+const timeoutSignal = (ms: number) => (typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(ms) : undefined);
 
 // Some models reject thinkingConfig (400 "invalid argument"); remember which so we stop sending it.
 const noThinkingConfig = new Set<string>();
@@ -77,19 +82,26 @@ const isTransientGeminiError = (err: any) => {
 /** Calls Gemini, walking down the model list when a model is overloaded or out of quota. */
 async function generateWithFallback(args: { contents: any[]; systemInstruction: string; temperature?: number; maxOutputTokens?: number }) {
   let lastErr: any = null;
+  const deadline = Date.now() + GEMINI_BUDGET_MS;
   for (const model of availableModels()) {
     for (let attempt = 0; attempt < 2; attempt++) {
+      const remaining = deadline - Date.now();
+      if (remaining < 1200) throw lastErr || new Error("Gemini budget exhausted");
       try {
         // Gemini 2.5/3.x count "thinking" tokens against the output budget; a chat reply grounded
         // in supplied data does not need it, and it was truncating long answers.
         const response = await ai.models.generateContent({
           model,
           contents: args.contents,
-          config: genConfig(model, args.systemInstruction, args.temperature ?? 0.4, args.maxOutputTokens ?? 2048),
+          config: { ...genConfig(model, args.systemInstruction, args.temperature ?? 0.4, args.maxOutputTokens ?? 2048), abortSignal: timeoutSignal(remaining) },
         });
         return { response, model };
       } catch (err: any) {
         lastErr = err;
+        if (/abort|timeout/i.test(String(err?.name || err?.message))) {
+          coolDown(model); // too slow right now — skip it for a minute
+          break;
+        }
         if (isInvalidArgument(err) && !noThinkingConfig.has(model)) {
           noThinkingConfig.add(model);
           continue; // retry once without thinkingConfig
@@ -564,7 +576,8 @@ function fallbackActionDialogue(
   userQuery: string,
   history: any[],
   ctx: { fmt: (n: number) => string; cardOutstanding: number; cardMinDue: number; savingsBalance: number; firstName: string }
-): { text: string; action: { type: "OPEN_FD" | "CHEQUE_BOOK" | "PAY_CARD"; params: Record<string, string> } | null } | null {
+): { text: string; action: { type: "OPEN_FD" | "CHEQUE_BOOK" | "PAY_CARD"; params: Record<string, string> } | null; options?: string[] } | null {
+  const CONFIRM = ["Yes, go ahead", "No, cancel"];
   const q = userQuery.toLowerCase();
   const lastModel = [...history].reverse().find((h) => h.role !== "user")?.text || "";
   const pending = /shall i go ahead/i.test(lastModel) ? lastModel : "";
@@ -611,9 +624,9 @@ function fallbackActionDialogue(
   if (wantsFd || prevFd) {
     const amt = parseAmount(q) ?? (prevFd ? Number((lastModel.match(/₹([\d,]+)/)?.[1] || "0").replace(/,/g, "")) || null : null);
     const months = parseMonths(q) ?? (prevFd ? Number(lastModel.match(/for (\d+) months/i)?.[1]) || null : null);
-    if (!amt && !months) return { text: `Happy to open a fixed deposit for you. How much would you like to deposit, and for how long? Rates go up to 6.75% per annum for 18 to 35 months, and the minimum is ₹10,000.`, action: null };
-    if (!amt) return { text: `Got it — a fixed deposit for ${months} months at ${fdRateFor(months!).toFixed(2)}% per annum. How much would you like to deposit? Your savings balance is ${fmt(ctx.savingsBalance)}.`, action: null };
-    if (!months) return { text: `Got it — a fixed deposit of ${fmt(amt)}. For how long? 18 to 35 months earns the best rate, 6.75% per annum.`, action: null };
+    if (!amt && !months) return { text: `Sure. How much would you like to deposit, and for how long? The best rate is 6.75% per annum for 18 to 35 months.`, action: null, options: ["₹50,000 for 12 months", "₹1,00,000 for 18 months", "₹2,00,000 for 24 months"] };
+    if (!amt) return { text: `A fixed deposit for ${months} months at ${fdRateFor(months!).toFixed(2)}% per annum. How much would you like to deposit?`, action: null, options: ["₹50,000", "₹1,00,000", "₹2,00,000"] };
+    if (!months) return { text: `A fixed deposit of ${fmt(amt)}. For how long?`, action: null, options: ["12 months", "18 months", "24 months", "36 months"] };
     if (amt < 10000) return { text: `The minimum fixed deposit is ₹10,000. How much would you like to deposit?`, action: null };
     if (amt > ctx.savingsBalance) return { text: `That's more than the ${fmt(ctx.savingsBalance)} in your savings account. What amount would you like to deposit instead?`, action: null };
     const rate = fdRateFor(months);
@@ -623,8 +636,9 @@ function fallbackActionDialogue(
         action: { type: "OPEN_FD", params: { amount: String(amt), months: String(months) } },
       };
     return {
-      text: `Here's the read-back: a fixed deposit of ${fmt(amt)} for ${months} months at ${rate.toFixed(2)}% per annum, debited from your savings account, maturing at about ${fmt(fdMaturityValue(amt, months, rate))}. Shall I go ahead?`,
+      text: `A fixed deposit of ${fmt(amt)} for ${months} months at ${rate.toFixed(2)}% per annum, maturing at about ${fmt(fdMaturityValue(amt, months, rate))}. Shall I go ahead?`,
       action: null,
+      options: CONFIRM,
     };
   }
 
@@ -643,7 +657,8 @@ function fallbackActionDialogue(
     if (!delivery) missing.push("delivered to your registered address at Marine Drive, or picked up at the Nariman Point branch");
     if (missing.length) {
       const have = [leaves && `${leaves} leaves`, account && `${account} account`, delivery && (delivery === "branch" ? "branch pickup" : "home delivery")].filter(Boolean).join(", ");
-      return { text: `${have ? `Got it — ${have} for the cheque book. ` : "Sure, I can order a cheque book. "}Just tell me ${missing.join("; ")}?`, action: null };
+      const options = !leaves ? ["25 leaves", "50 leaves", "100 leaves"] : !account ? ["Savings account", "Current account"] : ["Registered address", "Branch pickup"];
+      return { text: `${have ? `Got it — ${have} for the cheque book. ` : "Sure, I can order a cheque book. "}Just tell me ${missing.join("; ")}?`, action: null, options };
     }
     const where = delivery === "branch" ? "for pickup at the Nariman Point branch" : "to your registered address, 14B Marine Drive, Mumbai";
     if (direct)
@@ -651,7 +666,7 @@ function fallbackActionDialogue(
         text: `Done — your ${leaves}-leaf cheque book for the ${account} account has been requested ${where}. It's free and takes 4 working days; you can track it under Services.`,
         action: { type: "CHEQUE_BOOK", params: { leaves: leaves!, account: account!, delivery: delivery! } },
       };
-    return { text: `Here's the read-back: a ${leaves}-leaf cheque book for your ${account} account, ${where}, free of charge, in 4 working days. Shall I go ahead?`, action: null };
+    return { text: `A ${leaves}-leaf cheque book for your ${account} account, ${where}, in 4 working days. Shall I go ahead?`, action: null, options: CONFIRM };
   }
 
   // ---- pay credit card by voice/chat ----
@@ -662,11 +677,12 @@ function fallbackActionDialogue(
     const method = /qr|scan|phone|upi/.test(q) ? "qr" : /saving|account|debit|direct/.test(q) ? "savings" : prevPay && /QR/.test(lastModel) && !/savings or/i.test(lastModel) ? "qr" : undefined;
     let amt: number | null = /full|total|entire|whole|complete/.test(q) ? ctx.cardOutstanding : /minimum|min\b/.test(q) ? ctx.cardMinDue : parseAmount(q);
     if (!amt && prevPay) amt = Number((lastModel.match(/₹([\d,]+(?:\.\d+)?)(?= towards| from| via)/)?.[1] || "0").replace(/,/g, "")) || null;
-    if (!amt && !method) return { text: `Your credit card has ${fmt(ctx.cardOutstanding)} due, with a minimum of ${fmt(ctx.cardMinDue)}. How much would you like to pay — the full amount, the minimum, or another amount — and should I take it from your savings account or show a QR to scan?`, action: null };
-    if (!amt) return { text: `Sure — ${method === "qr" ? "a QR to scan" : "from your savings account"}. How much: the full ${fmt(ctx.cardOutstanding)}, the minimum ${fmt(ctx.cardMinDue)}, or another amount?`, action: null };
+    const amountOptions = [`Full ${fmt(ctx.cardOutstanding)}`, `Minimum ${fmt(ctx.cardMinDue)}`, "Another amount"];
+    if (!amt && !method) return { text: `Your card has ${fmt(ctx.cardOutstanding)} due, minimum ${fmt(ctx.cardMinDue)}. How much would you like to pay?`, action: null, options: amountOptions };
+    if (!amt) return { text: `Sure — ${method === "qr" ? "a QR to scan" : "from your savings account"}. How much would you like to pay?`, action: null, options: amountOptions };
     if (amt > ctx.cardOutstanding) amt = ctx.cardOutstanding;
-    if (!method) return { text: `Got it — ${fmt(amt)} towards your card. Should I debit your savings account directly, or show a QR you can scan from any phone?`, action: null };
-    if (method === "savings" && amt > ctx.savingsBalance) return { text: `Your savings balance is ${fmt(ctx.savingsBalance)}, which isn't enough for ${fmt(amt)}. Would you like a smaller amount, or a QR to pay from another account?`, action: null };
+    if (!method) return { text: `${fmt(amt)} towards your card. Should I debit your savings account, or show a QR to scan?`, action: null, options: ["Savings account", "Show a QR"] };
+    if (method === "savings" && amt > ctx.savingsBalance) return { text: `Your savings balance is ${fmt(ctx.savingsBalance)}, which isn't enough for ${fmt(amt)}. A smaller amount, or a QR from another account?`, action: null, options: [`Minimum ${fmt(ctx.cardMinDue)}`, "Show a QR"] };
     if (direct)
       return {
         text:
@@ -676,11 +692,9 @@ function fallbackActionDialogue(
         action: { type: "PAY_CARD", params: { amount: String(Math.round(amt)), method } },
       };
     return {
-      text:
-        method === "qr"
-          ? `Here's the read-back: a payment of ${fmt(amt)} towards your credit card via QR, which you can scan from any phone or UPI app. Shall I go ahead?`
-          : `Here's the read-back: a payment of ${fmt(amt)} towards your credit card from your savings account, leaving ${fmt(ctx.savingsBalance - amt)} there. Shall I go ahead?`,
+      text: method === "qr" ? `${fmt(amt)} towards your card via a QR you can scan from any phone. Shall I go ahead?` : `${fmt(amt)} towards your card from your savings account. Shall I go ahead?`,
       action: null,
+      options: CONFIRM,
     };
   }
   return null;
@@ -823,7 +837,9 @@ The tags are hidden from the customer; never mention them.`;
       ? `
 
 VOICE MODE: the customer is talking to you and hears every word you write through a voice engine, while a screen beneath the voice orb can show a card.
-- Speak like a warm, competent relationship manager on a call: one to three short sentences, under 45 words, plain spoken English. No lists, no markdown, no symbols, no abbreviations (say "per annum", "account", "U T R").
+- Say as little as a good relationship manager would on a call: one or two short sentences, under 30 words, plain spoken English. Say only the essential — the answer, or what you still need from the customer. No lists, no markdown, no symbols, no abbreviations (say "per annum", "account", "U T R").
+- Whenever you need the customer to choose (amount, payment channel, leaves, account, delivery, tenure) or to confirm, end the reply with an options block so they can tap instead of speak:
+  [OPTIONS:Choice one|Choice two|Choice three]   (2–5 short choices; for a confirmation use [OPTIONS:Yes, go ahead|No, cancel])
 - Never read out tables or several figures in a row. When the answer contains multiple numbers (account balances, a summary, updates, statement lines, loan or deposit details, penalties, offers), speak only the headline — e.g. "Your total balance across accounts is fourteen lakh ninety-five thousand rupees" — then say "I've put the details below for you", and attach the details as a display block at the very END of the reply:
   [SHOW:Title|Label=Value|Label=Value|…]
   Up to 8 rows per block, values with ₹ and Indian commas, up to 3 blocks. The block is rendered as a card and never spoken.
@@ -850,7 +866,7 @@ ${matchedGuide ? `\nOFFICIAL BANKING GUIDE REFERENCE FOR THIS INQUIRY (backgroun
       return null;
     };
 
-    const computeFallback = (): { text: string; intent: string | null; action: ChatAction | null; display: DisplayBlock[] } => {
+    const computeFallback = (): { text: string; intent: string | null; action: ChatAction | null; display: DisplayBlock[]; options?: string[] } => {
       const savingsBalance = dashboard?.accounts?.find((a) => a.type === "Savings")?.balance ?? 124560.5;
       const dialogue = fallbackActionDialogue(userQuery, Array.isArray(history) ? history : [], {
         fmt,
@@ -859,7 +875,7 @@ ${matchedGuide ? `\nOFFICIAL BANKING GUIDE REFERENCE FOR THIS INQUIRY (backgroun
         savingsBalance,
         firstName: userName.split(" ")[0],
       });
-      if (dialogue) return { text: dialogue.text, intent: null, action: dialogue.action, display: [] as DisplayBlock[] };
+      if (dialogue) return { text: dialogue.text, intent: null, action: dialogue.action, display: [] as DisplayBlock[], options: dialogue.options };
     let fallbackReply = "";
     let detectedIntent: string | null = null;
 
@@ -924,9 +940,10 @@ Select your preferred payment method below to proceed.`;
         const first = userName.split(" ")[0];
         if (detectedIntent === "ACCOUNT_SUMMARY") {
           return {
-            text: `${first}, your total balance across your accounts is ${fmt(total)}, and your credit card has ${fmt(cardOutstanding)} due on ${cardDueDate}. I've put the full picture below for you. Anything you'd like to act on?`,
+            text: `${first}, your total balance is ${fmt(total)}. The full picture is below.`,
             intent: detectedIntent,
             action: null,
+            options: ["Pay my card bill", "Open a fixed deposit", "Any updates for me?"],
             display: [
               {
                 title: "Account summary",
@@ -942,9 +959,10 @@ Select your preferred payment method below to proceed.`;
         }
         if (detectedIntent === "UPDATES") {
           return {
-            text: `Here's what's new, ${first}: your credit card statement of ${fmt(cardOutstanding)} is due on ${cardDueDate}, your loan E M I goes out on the first, and your fixed deposit matures in about six months. I've listed everything below. Want me to pay the card bill?`,
+            text: `Your card bill of ${fmt(cardOutstanding)} is due on ${cardDueDate}, ${first}. Everything else is listed below.`,
             intent: detectedIntent,
             action: null,
+            options: ["Pay my card bill", "Tell me about my fixed deposit"],
             display: [
               {
                 title: "Updates for you",
@@ -981,10 +999,11 @@ Select your preferred payment method below to proceed.`;
         }
         if (detectedIntent === "CARD_DUE") {
           return {
-            text: cardOutstanding > 0 ? `Your credit card has ${fmt(cardOutstanding)} due on ${cardDueDate}, with a minimum of ${fmt(cardMinDue)}. The details are below. Would you like to pay it now?` : `Good news — there's nothing due on your credit card right now.`,
+            text: cardOutstanding > 0 ? `Your card has ${fmt(cardOutstanding)} due on ${cardDueDate}, minimum ${fmt(cardMinDue)}. Would you like to pay it now?` : `Good news — there's nothing due on your credit card right now.`,
             intent: detectedIntent,
             action: null,
             display: [],
+            options: cardOutstanding > 0 ? [`Pay full ${fmt(cardOutstanding)}`, `Pay minimum ${fmt(cardMinDue)}`, "Not now"] : [],
           };
         }
         if (detectedIntent === "PAY_CREDIT_CARD") {
@@ -997,7 +1016,14 @@ Select your preferred payment method below to proceed.`;
     return { userQuery, contents, fullSystem, detectIntent, computeFallback };
 }
 
-const stripIntentTags = (t: string) => t.replace(/\[(?:INTENT|ACTION|SHOW):[^\]]*\]/g, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+const stripIntentTags = (t: string) => t.replace(/\[(?:INTENT|ACTION|SHOW|OPTIONS):[^\]]*\]/g, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+
+/** Pulls `[OPTIONS:a|b|c]` out of a reply — tappable choices shown under the voice orb. */
+function parseOptions(text: string): string[] {
+  const m = text.match(/\[OPTIONS:([^\]]*)\]/);
+  if (!m) return [];
+  return m[1].split("|").map((o) => o.trim()).filter(Boolean).slice(0, 5);
+}
 
 interface DisplayBlock {
   title: string;
@@ -1074,6 +1100,7 @@ app.post("/api/ai/chat", async (req, res) => {
       intent: prep.detectIntent(replyText),
       action: parseAction(replyText),
       display: parseDisplayBlocks(replyText),
+      options: parseOptions(replyText),
       card: coreCreditCard,
       source: "gemini",
       model,
@@ -1088,6 +1115,7 @@ app.post("/api/ai/chat", async (req, res) => {
       intent: fb.intent,
       action: fb.action,
       display: fb.display,
+      options: fb.options || [],
       source: "fallback",
       card: coreCreditCard,
       fallback: true,
@@ -1120,7 +1148,7 @@ app.post("/api/ai/chat/stream", async (req, res) => {
       const idx = full.lastIndexOf("[");
       if (idx >= 0 && full.indexOf("]", idx) < 0) safe = full.slice(0, idx);
     }
-    const clean = safe.replace(/\[(?:INTENT|ACTION|SHOW):[^\]]*\]/g, "");
+    const clean = safe.replace(/\[(?:INTENT|ACTION|SHOW|OPTIONS):[^\]]*\]/g, "");
     if (clean.length > emitted.length) {
       send({ delta: clean.slice(emitted.length) });
       emitted = clean;
@@ -1132,19 +1160,26 @@ app.post("/api/ai/chat/stream", async (req, res) => {
     if (req.body?.offline) throw new Error("offline engine requested");
     let lastErr: any = null;
     let usedModel = "";
+    const deadline = Date.now() + GEMINI_BUDGET_MS;
     for (const model of availableModels()) {
       let started = false;
+      const remaining = deadline - Date.now();
+      if (remaining < 1200) break;
+      // The abort only guards the wait for the FIRST token; once text is flowing we let it finish.
+      const firstToken = new AbortController();
+      const firstTokenTimer = setTimeout(() => firstToken.abort(), remaining);
       try {
         const stream = await ai.models.generateContentStream({
           model,
           contents: prep.contents,
-          config: genConfig(model, prep.fullSystem, 0.4, 1024),
+          config: { ...genConfig(model, prep.fullSystem, 0.4, 1024), abortSignal: firstToken.signal },
         });
         for await (const chunk of stream) {
           const t = chunk.text;
           if (!t) continue;
           if (!started) {
             started = true;
+            clearTimeout(firstTokenTimer);
             send({ start: true, model });
           }
           full += t;
@@ -1154,7 +1189,13 @@ app.post("/api/ai/chat/stream", async (req, res) => {
         usedModel = model;
         break;
       } catch (err: any) {
+        clearTimeout(firstTokenTimer);
         lastErr = err;
+        if (/abort|timeout/i.test(String(err?.name || err?.message)) && !started) {
+          coolDown(model);
+          console.warn(`[India Bank AI Chat] ${model} gave no token within ${remaining}ms — cooling down`);
+          continue;
+        }
         if (started && full.trim()) {
           usedModel = model; // partial answer already on screen — finish with what we have
           break;
@@ -1189,13 +1230,13 @@ app.post("/api/ai/chat/stream", async (req, res) => {
     }
     if (!usedModel) throw lastErr || new Error("No Gemini model available");
     pushDelta(true);
-    send({ done: true, intent: prep.detectIntent(full), action: parseAction(full), display: parseDisplayBlocks(full), card: coreCreditCard, source: "gemini", model: usedModel, text: stripIntentTags(full) });
+    send({ done: true, intent: prep.detectIntent(full), action: parseAction(full), display: parseDisplayBlocks(full), options: parseOptions(full), card: coreCreditCard, source: "gemini", model: usedModel, text: stripIntentTags(full) });
   } catch (err: any) {
     console.warn("[India Bank AI Chat] stream fallback:", String(err?.message || err).slice(0, 200));
     const fb = prep.computeFallback();
     if (!emitted) send({ start: true, model: "fallback" });
     send({ delta: fb.text });
-    send({ done: true, intent: fb.intent, action: fb.action, display: fb.display, card: coreCreditCard, source: "fallback", text: fb.text });
+    send({ done: true, intent: fb.intent, action: fb.action, display: fb.display, options: fb.options || [], card: coreCreditCard, source: "fallback", text: fb.text });
   }
   res.end();
 });

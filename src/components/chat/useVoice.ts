@@ -102,6 +102,9 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
   const [transcribing, setTranscribing] = useState(false);
   const [paused, setPaused] = useState(false);
   const [audioBlocked, setAudioBlocked] = useState(false);
+  const [muted, setMutedState] = useState(false);
+  const mutedRef = useRef(false);
+  const skipRef = useRef<(() => void) | null>(null);
   const [voiceReplies, setVoiceRepliesState] = useState<boolean>(false); // on only inside the voice session
   const [handsFree, setHandsFreeState] = useState(false);
   const [serverTts, setServerTts] = useState<boolean | null>(null);
@@ -221,11 +224,25 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
           el.onerror = null;
           resolve(r);
         };
-        el.onended = () => done('ok');
-        el.onerror = () => done('error');
+        el.onended = () => {
+          skipRef.current = null;
+          done('ok');
+        };
+        el.onerror = () => {
+          skipRef.current = null;
+          done('error');
+        };
         el.src = url;
-        el.muted = false;
+        el.muted = mutedRef.current;
         el.volume = 1;
+        skipRef.current = () => {
+          try {
+            el.pause();
+          } catch {
+            /* ignore */
+          }
+          done('ok');
+        };
         const p = el.play();
         if (p && typeof p.catch === 'function') {
           p.catch((err: any) => {
@@ -240,7 +257,11 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
   const speakWithBrowser = useCallback(
     (text: string) =>
       new Promise<void>((resolve) => {
-        if (!synthesisSupported) return resolve();
+        if (!synthesisSupported || mutedRef.current) return resolve();
+        skipRef.current = () => {
+          window.speechSynthesis.cancel();
+          resolve();
+        };
         const u = new SpeechSynthesisUtterance(text);
         const voices = window.speechSynthesis.getVoices();
         const v = voices.find((x) => /en-IN/i.test(x.lang)) || voices.find((x) => /^en/i.test(x.lang)) || null;
@@ -253,6 +274,20 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
       }),
     [synthesisSupported]
   );
+
+  /** Mute the speaker without touching the session — Zora keeps going, silently. */
+  const setMuted = useCallback((v: boolean) => {
+    mutedRef.current = v;
+    setMutedState(v);
+    if (audioElRef.current) audioElRef.current.muted = v;
+    if (v && synthesisSupported) window.speechSynthesis.cancel();
+  }, [synthesisSupported]);
+
+  /** Jump to the next sentence (or finish, if this was the last one). */
+  const skip = useCallback(() => {
+    skipRef.current?.();
+    skipRef.current = null;
+  }, []);
 
   const finishedSpeaking = useCallback(() => {
     playingRef.current = false;
@@ -598,6 +633,9 @@ export function useVoice(opts: { onTranscript: (text: string) => void }) {
     synthesisSupported: synthesisSupported || serverTts === true,
     naturalVoice: serverTts === true,
     audioBlocked,
+    muted,
+    setMuted,
+    skip,
     listening,
     interim,
     speaking,
